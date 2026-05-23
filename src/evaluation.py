@@ -220,23 +220,31 @@ def compare_runs(results_dir="results"):
 # ── Main ──────────────────────────────────────────────────
 if __name__ == "__main__":
     from baseline_rag import BaselineRAG
+    from hybrid_rag import HybridRAG
 
     print("=" * 55)
-    print("  RAG Evaluation Framework -- Day 3-4")
+    print("  RAG Evaluation Framework -- Day 3-4 / Day 8-10")
     print("=" * 55)
 
-    # Build pipeline
-    rag = BaselineRAG().build()
+    # 1. Run Baseline Evaluation
+    print("\n" + "="*55)
+    print("  1. RUNNING BASELINE RAG EVALUATION")
+    print("="*55)
+    baseline_rag = BaselineRAG().build()
+    baseline_eval_data = build_eval_dataset(baseline_rag, n_samples=30)
+    baseline_metrics = run_ragas_evaluation(baseline_eval_data, run_name="baseline")
+    display_results(baseline_metrics)
+    save_results(baseline_metrics)
 
-    # Build eval dataset
-    eval_data = build_eval_dataset(rag, n_samples=30)
+    # 2. Run Hybrid Evaluation
+    print("\n" + "="*55)
+    print("  2. RUNNING HYBRID RAG EVALUATION")
+    print("="*55)
+    hybrid_rag = HybridRAG().build()
+    hybrid_eval_data = build_eval_dataset(hybrid_rag, n_samples=30)
+    hybrid_metrics = run_ragas_evaluation(hybrid_eval_data, run_name="hybrid")
+    display_results(hybrid_metrics)
+    save_results(hybrid_metrics)
 
-    # Run evaluation
-    metrics = run_ragas_evaluation(eval_data, run_name="baseline")
-
-    # Display + save
-    display_results(metrics)
-    save_results(metrics)
-
-    # Show comparison (just baseline for now)
+    # 3. Show Comparison
     compare_runs()
