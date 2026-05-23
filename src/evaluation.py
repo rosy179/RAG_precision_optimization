@@ -104,24 +104,27 @@ def run_ragas_evaluation(eval_data: dict, run_name="baseline") -> dict:
             embeddings=evaluator_embeddings,
         )
 
-        print("\nDEBUG SCORES TYPE:", type(scores))
-        print("DEBUG SCORES:", scores)
+        def safe_mean(values):
+            clean_values = [v for v in values if v is not None]
+            if not clean_values:
+                return 0.0
+            return sum(clean_values) / len(clean_values)
 
         results = {
             "run_name":          run_name,
             "timestamp":         datetime.now().isoformat(),
             "n_samples":         len(eval_data["question"]),
-            "faithfulness":      round(scores["faithfulness"], 4),
-            "answer_relevancy":  round(scores["answer_relevancy"], 4),
-            "context_precision": round(scores["context_precision"], 4),
-            "context_recall":    round(scores["context_recall"], 4),
-            "avg_score":         round(sum([
-                scores["faithfulness"],
-                scores["answer_relevancy"],
-                scores["context_precision"],
-                scores["context_recall"],
-            ]) / 4, 4),
+            "faithfulness":      round(safe_mean(scores["faithfulness"]), 4),
+            "answer_relevancy":  round(safe_mean(scores["answer_relevancy"]), 4),
+            "context_precision": round(safe_mean(scores["context_precision"]), 4),
+            "context_recall":    round(safe_mean(scores["context_recall"]), 4),
         }
+        results["avg_score"] = round(sum([
+            results["faithfulness"],
+            results["answer_relevancy"],
+            results["context_precision"],
+            results["context_recall"],
+        ]) / 4, 4)
         return results
 
     except ImportError:
@@ -226,7 +229,7 @@ if __name__ == "__main__":
     rag = BaselineRAG().build()
 
     # Build eval dataset
-    eval_data = build_eval_dataset(rag, n_samples=2)
+    eval_data = build_eval_dataset(rag, n_samples=30)
 
     # Run evaluation
     metrics = run_ragas_evaluation(eval_data, run_name="baseline")
