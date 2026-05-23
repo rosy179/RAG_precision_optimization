@@ -1,0 +1,46 @@
+# --- Python cache/bytecode ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Packaging / build ---
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- OS/editor files ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Secrets / environment ---
+.env
+.env.*
+!.env.example
+
+# --- Logs and temporary files ---
+*.log
+tmp/
+temp/
+
+# --- Project generated data/artifacts ---
+data/chroma_db/
+data/*.json
+results/*.json
+
+# --- Keep git for directory structure ---
+!data/.gitkeep
+!results/.gitkeep
