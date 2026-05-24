@@ -221,9 +221,10 @@ def compare_runs(results_dir="results"):
 if __name__ == "__main__":
     from baseline_rag import BaselineRAG
     from hybrid_rag import HybridRAG
+    from reranker_rag import RerankerRAG
 
     print("=" * 55)
-    print("  RAG Evaluation Framework -- Day 3-4 / Day 8-10")
+    print("  RAG Evaluation Framework -- Day 3-4 / 8-10 / 11-13")
     print("=" * 55)
 
     # 1. Run Baseline Evaluation
@@ -246,5 +247,15 @@ if __name__ == "__main__":
     display_results(hybrid_metrics)
     save_results(hybrid_metrics)
 
-    # 3. Show Comparison
+    # 3. Run Reranker Evaluation
+    print("\n" + "="*55)
+    print("  3. RUNNING RERANKER RAG EVALUATION")
+    print("="*55)
+    reranker_rag = RerankerRAG().build()
+    reranker_eval_data = build_eval_dataset(reranker_rag, n_samples=30)
+    reranker_metrics = run_ragas_evaluation(reranker_eval_data, run_name="reranked")
+    display_results(reranker_metrics)
+    save_results(reranker_metrics)
+
+    # 4. Show Comparison
     compare_runs()

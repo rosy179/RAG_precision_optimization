@@ -1,6 +1,6 @@
 # RAG Precision Optimization
 
-> **Goal:** Improve RAG system accuracy from ~68% to 85-90% faithfulness using 5 advanced techniques.
+> **Goal:** Improve RAG system accuracy from baseline ~88% to 95%+ using 5 advanced techniques over 45 days.
 
 ---
 
@@ -9,29 +9,40 @@
 ```
 RAG_prescision_optimization/
 ├── data/
-│   ├── squad_qa.json          # 150 QA pairs (SQUAD v1.1)
-│   ├── wiki_documents.json    # 15 Wikipedia AI/ML articles
-│   ├── arxiv_papers.json      # 10 RAG research paper abstracts
-│   ├── rag_dataset.json       # Combined dataset (734 KB)
-│   └── chroma_db/             # Local vector store (auto-created)
+│   ├── squad_qa.json              # 150 QA pairs (SQUAD v1.1)
+│   ├── wiki_documents.json        # 15 Wikipedia AI/ML articles
+│   ├── arxiv_papers.json          # 10 RAG research paper abstracts
+│   ├── rag_dataset.json           # Combined dataset (~750 KB)
+│   └── chroma_db/                 # Local vector store (auto-created by pipeline)
+│
 ├── src/
-│   ├── baseline_rag.py        # Day 2: Vanilla RAG pipeline
-│   ├── evaluation.py          # Day 3-4: Ragas evaluation framework
-│   ├── hybrid_retriever.py    # Week 2: BM25 + Semantic hybrid search
-│   ├── reranker.py            # Week 2: CrossEncoder reranking
-│   ├── query_expansion.py     # Week 3: Multi-query + HyDE
-│   └── utils.py               # Shared utilities
-├── notebooks/
-│   ├── 01_baseline.ipynb
-│   ├── 02_hybrid_search.ipynb
-│   └── 03_evaluation.ipynb
+│   ├── baseline_rag.py            # Day 2  : Vanilla RAG pipeline
+│   ├── evaluation.py              # Day 3-4: Ragas evaluation framework
+│   ├── hybrid_rag.py              # Day 8-10: BM25 + Semantic hybrid search + RRF
+│   ├── reranker_rag.py            # Day 11-13: CrossEncoder reranking layer
+│   └── query_expansion.py        # Day 15-17: Multi-query + HyDE (upcoming)
+│
+├── notebooks/                     # Jupyter notebooks (optional exploration)
+│
 ├── results/
-│   └── *_metrics.json         # Evaluation results per technique
-├── config/
-├── collect_dataset.py         # Step 1: SQUAD + Wikipedia collection
-├── collect_arxiv_hf.py        # Step 1b: ArXiv papers
+│   ├── baseline_metrics.json      # Week 1 eval: avg 0.8782
+│   ├── baseline_test_results.json # Baseline pipeline test outputs
+│   ├── hybrid_metrics.json        # Week 2 eval: avg 0.8999
+│   ├── hybrid_test_results.json   # Hybrid pipeline test outputs
+│   ├── reranked_metrics.json      # Week 2b eval: avg 0.9196
+│   └── reranker_test_results.json # Reranker pipeline test outputs
+│
+├── config/                        # Reserved for future config files
+│
+├── run_reranker_eval.py           # Run + evaluate Reranker pipeline
+├── collect_dataset.py             # Data collection: SQUAD + Wikipedia
+├── collect_arxiv.py               # Data collection: ArXiv papers (with retry)
+├── collect_arxiv_hf.py            # Data collection: ArXiv via HuggingFace datasets
+├── download_rag_data.py           # Interactive data downloader
+├── align_dataset.py               # Merge SQUAD contexts into documents
 ├── requirements.txt
-├── .env.example               # Copy to .env and add API keys
+├── .env.example                   # Copy to .env and add API keys
+├── HOW_TO_RUN.md                  # Step-by-step guide for each technique
 └── README.md
 ```
 
@@ -39,72 +50,84 @@ RAG_prescision_optimization/
 
 ## Quick Start
 
-### 1. Setup environment
+### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
+```
+
+### 2. Configure API keys
+```bash
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Open .env and set your OPENAI_API_KEY
 ```
 
-### 2. Data is already collected
+### 3. Data is ready
 ```
-data/rag_dataset.json  -- 150 QA pairs + 25 documents ready
+data/rag_dataset.json  —  150 QA pairs + 56 documents, ready to use
 ```
 
-### 3. Run baseline RAG (mock mode, no API key needed)
+### 4. Run a technique
 ```bash
-cd src
-python baseline_rag.py
+# Baseline RAG (requires OPENAI_API_KEY)
+python src/baseline_rag.py
+
+# Hybrid Search
+python src/hybrid_rag.py
+
+# Reranking (CrossEncoder)
+python src/reranker_rag.py
+
+# Run full evaluation + comparison
+python run_reranker_eval.py
 ```
 
-### 4. Run with real API key
-```bash
-# Set OPENAI_API_KEY in .env, then:
-cd src
-python baseline_rag.py     # Test pipeline
-python evaluation.py       # Ragas evaluation (30 samples)
-```
+> See [HOW_TO_RUN.md](HOW_TO_RUN.md) for detailed instructions and explanations.
 
 ---
 
 ## 45-Day Progress
 
-| Week | Focus | Status |
-|------|-------|--------|
-| **Week 1** | Data + Baseline RAG + Evaluation framework | ✅ In Progress |
-| **Week 2** | Hybrid Search (BM25 + Semantic) + Reranking | ⬜ Pending |
-| **Week 3** | Query Expansion + Adaptive Context | ⬜ Pending |
-| **Week 4** | Chain-of-Thought Retrieval + Evaluation | ⬜ Pending |
-| **Week 5-6** | Documentation + Presentation | ⬜ Pending |
+| Week | Technique | Status | Avg Score |
+|------|-----------|--------|-----------|
+| **Week 1** | Baseline RAG + Evaluation Framework | ✅ Complete | 0.8782 |
+| **Week 2a** | Hybrid Search (BM25 + Semantic + RRF) | ✅ Complete | 0.8999 |
+| **Week 2b** | Reranking (CrossEncoder) | ✅ Complete | **0.9196** |
+| **Week 3** | Query Expansion (Multi-Query + HyDE) | 🔜 Next | ~0.93+ |
+| **Week 4** | Chain-of-Thought Retrieval | ⬜ Pending | ~0.95+ |
+| **Week 5-6** | Documentation + Presentation | ⬜ Pending | — |
 
 ---
 
-## Expected Results
+## Actual Results (Ragas, 30 SQUAD test samples)
 
-| Technique | Faithfulness | Relevancy | vs Baseline |
-|-----------|-------------|-----------|-------------|
-| Baseline | 0.68 | 0.65 | — |
-| + Hybrid Search | 0.73 | 0.70 | +5-10% |
-| + Reranking | 0.76 | 0.75 | +8-12% |
-| + Query Expansion | 0.78 | 0.77 | +6-10% |
-| **Final (ALL)** | **0.83** | **0.83** | **+22%** |
+| Technique | Faithfulness | Relevancy | Precision | Recall | **AVG** |
+|-----------|:-----------:|:---------:|:---------:|:------:|:-------:|
+| Baseline RAG | 0.8389 | 0.8405 | 0.9000 | 0.9333 | 0.8782 |
+| + Hybrid Search | 0.8833 | 0.8717 | 0.8778 | 0.9667 | 0.8999 |
+| + Reranking | 0.8389 | 0.8755 | **0.9639** | **1.0000** | **0.9196** |
+| + Query Expansion | — | — | — | — | ~0.93+ |
+| **Final (ALL)** | — | — | — | — | ~0.95+ |
 
 ---
 
-## Dataset Summary
+## Dataset
 
-- **150 QA pairs** — SQUAD v1.1 (question + context + ground truth answer)
-- **15 Wikipedia docs** — Machine Learning, Deep Learning, AI, NLP, Transformer, LLM, RAG, Vector DB...
-- **10 ArXiv papers** — RAG, DPR, RAGAS, Self-RAG, HyDE, Sentence-BERT, Hybrid Search...
-- **Total:** ~550K characters of technical AI/ML content
+| Source | Count | Content |
+|--------|-------|---------|
+| SQUAD v1.1 | 150 QA pairs | Question + context + ground truth answer |
+| Wikipedia | 15 articles | ML, DL, AI, NLP, Transformer, LLM, RAG, Vector DB… |
+| ArXiv abstracts | 10 papers | RAG, DPR, RAGAS, Self-RAG, HyDE, Sentence-BERT… |
+| **Total** | **56 documents** | **~750K characters of technical AI/ML content** |
+
+Train/test split: 70% train (105 QA pairs) / 30% test (45 QA pairs, 30 used for eval).
 
 ---
 
 ## Evaluation Metrics (Ragas)
 
-| Metric | Meaning |
-|--------|---------|
-| **Faithfulness** | Is the answer grounded in retrieved context? |
-| **Answer Relevancy** | Is the answer relevant to the question? |
-| **Context Precision** | Are retrieved chunks actually useful? |
-| **Context Recall** | Does context contain all info needed? |
+| Metric | What it measures |
+|--------|-----------------|
+| **Faithfulness** | Is the answer grounded in retrieved context? (no hallucination) |
+| **Answer Relevancy** | Is the answer actually relevant to the question? |
+| **Context Precision** | Are the retrieved chunks genuinely useful for the answer? |
+| **Context Recall** | Does the retrieved context contain all information needed? |
