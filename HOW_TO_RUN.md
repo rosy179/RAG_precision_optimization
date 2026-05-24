@@ -169,11 +169,11 @@ RETRIEVE_DEPTH=20    # Số candidates trước khi rerank (nên 5-10x TOP_K)
 
 ## So sánh toàn bộ (tính đến hiện tại)
 
-```
-python run_reranker_eval.py
+```bash
+python run_query_expansion_eval.py   # chạy QE và in bảng đầy đủ
 ```
 
-Sẽ in ra bảng:
+Kết quả thực đo (Ragas, 30 SQUAD test samples):
 
 ```
 ===========================================================================
@@ -181,31 +181,112 @@ Sẽ in ra bảng:
 ===========================================================================
   Run                         Faith   Relev    Prec  Recall     AVG
   ───────────────────────── ─────── ─────── ─────── ─────── ───────
-  reranked                   0.8389  0.8755  0.9639  1.0000  0.9196
+  reranked                   0.8389  0.8755  0.9639  1.0000  0.9196   ← best overall
+  query_expansion_combined   0.8222  0.8423  0.9639  1.0000  0.9071
   hybrid                     0.8833  0.8717  0.8778  0.9667  0.8999
   baseline                   0.8389  0.8405  0.9000  0.9333  0.8782
 ===========================================================================
 ```
 
+**Nhận xét tổng thể:**
+- Reranking là kỹ thuật hiệu quả nhất trên SQUAD factual QA (0.9196)
+- Query Expansion (combined) duy trì Precision và Recall hoàn hảo nhưng giảm Faithfulness do HyDE hallucination
+- Faithfulness là điểm cần cải thiện tiếp theo — Chain-of-Thought (Day 22-24) sẽ giải quyết vấn đề này
+
 ---
 
-## Kỹ thuật 4: Query Expansion — Multi-Query + HyDE (Day 15-17) [Upcoming]
+## Kỹ thuật 4: Query Expansion — Multi-Query + HyDE (Day 15-17)
 
-**File:** `src/query_expansion.py` (chưa implement)
+**File:** `src/query_expansion.py`
+**Runner:** `run_query_expansion_eval.py`
 
-**Kế hoạch:**
+**Giải thích:**
 
-**Multi-Query:** Dùng LLM sinh ra 3-5 biến thể của câu hỏi gốc, chạy retrieval cho từng biến thể, gộp kết quả. Giải quyết vấn đề câu hỏi mơ hồ hoặc có nhiều cách diễn đạt.
+Một câu hỏi đơn lẻ thường không đủ để kéo về tất cả các góc độ thông tin cần thiết. Kỹ thuật này mở rộng query trước khi retrieval.
 
-**HyDE (Hypothetical Document Embeddings):** Thay vì embed câu hỏi, dùng LLM sinh ra một đoạn văn *giả định* trả lời câu hỏi, rồi embed đoạn đó để retrieval. Embedding của "câu trả lời giả" gần với embedding của document thật hơn so với embedding của câu hỏi.
+**Multi-Query:** LLM sinh ra N cách hỏi khác nhau → retrieval cho từng cách → gộp + dedup kết quả.
 
-```bash
-# Sẽ chạy bằng (chưa có):
-python src/query_expansion.py
-python run_query_expansion_eval.py
+```
+"How does RAG work?"
+    ↓ LLM generates variants
+"What is the mechanism behind retrieval augmented generation?"
+"Explain the architecture of RAG systems"
+"How does retrieval-augmented generation retrieve documents?"
 ```
 
-**Kỳ vọng:** avg_score ~0.93+
+**HyDE (Hypothetical Document Embeddings):** Thay vì embed câu hỏi, dùng LLM sinh một *đoạn văn giả định* trả lời câu hỏi, rồi embed đoạn đó làm query. Embedding của "câu trả lời giả" nằm gần embedding của document thật hơn so với embedding của câu hỏi ngắn.
+
+```
+"How does RAG work?"
+    ↓ LLM generates hypothetical answer
+"RAG combines a retrieval system with a generative model.
+ Given a query, it first retrieves relevant passages from a
+ knowledge base using dense retrieval, then passes those
+ passages as context to a language model..."
+    ↓ Embed this hypothetical answer → retrieve similar documents
+```
+
+**Combined mode** (mặc định): cả hai kỹ thuật cùng lúc, tất cả candidates gộp lại → CrossEncoder rerank.
+
+```
+Original Query
+    ├── Multi-Query: [variant₁, variant₂, variant₃] → Hybrid Retrieval × 3
+    └── HyDE: [hypothetical_doc] → Hybrid Retrieval × 1
+                        ↓
+          Merged + Deduplicated Candidates
+                        ↓
+             CrossEncoder Reranking
+                        ↓
+               Top 3 → LLM → Answer
+```
+
+**Chạy pipeline test (5 câu hỏi):**
+```bash
+python src/query_expansion.py
+# Output: results/query_expansion_test_results.json
+```
+
+**Chạy evaluation + so sánh:**
+```bash
+python run_query_expansion_eval.py                  # combined (default)
+python run_query_expansion_eval.py --mode multi_query
+python run_query_expansion_eval.py --mode hyde
+```
+
+**Kết quả đạt được (combined mode):**
+| Metric | Reranked | Query Expansion | Delta |
+|--------|----------|-----------------|-------|
+| Faithfulness | 0.8389 | 0.8222 | -2.0% ↓ |
+| Answer Relevancy | 0.8755 | 0.8423 | -3.8% ↓ |
+| Context Precision | 0.9639 | **0.9639** | 0% (giữ nguyên) |
+| Context Recall | 1.0000 | **1.0000** | 0% (giữ nguyên) |
+| **Average** | **0.9196** | **0.9071** | **-1.4%** |
+
+**Phân tích — tại sao QE không cải thiện trên SQUAD?**
+
+Query Expansion phát huy tốt nhất trên câu hỏi mơ hồ, open-ended. SQUAD gồm các câu hỏi factual cụ thể ("In what year?", "Who was?") — Multi-Query tạo ra biến thể nhưng không mang thêm góc nhìn mới.
+
+HyDE đặc biệt nhạy cảm với dạng câu hỏi factual: khi LLM sinh ra đoạn giả định, nó có thể **hallucinate số liệu cụ thể** (năm, tên người, con số), khiến embedding kéo về document sai:
+```
+Q: "In what year was the LaFortune Center renamed?"
+HyDE (sai): "...renamed in 1980..."   ← LLM đoán sai năm
+→ Retrieval kéo về document không liên quan
+```
+
+**Khuyến nghị theo loại câu hỏi:**
+| Loại câu hỏi | Mode tốt nhất |
+|---|---|
+| Factual QA (SQUAD, trivia) | `multi_query` hoặc tắt QE |
+| Open-ended / conceptual | `combined` |
+| Technical documentation | `hyde` |
+
+**Config tunable:**
+```bash
+# Trong .env
+N_QUERIES=3          # Số biến thể Multi-Query sinh ra
+TOP_K=3              # Số passage cuối truyền vào LLM
+RETRIEVE_DEPTH=20    # Candidates mỗi query variant
+```
 
 ---
 
@@ -216,7 +297,10 @@ python run_query_expansion_eval.py
 | Test baseline pipeline | `python src/baseline_rag.py` |
 | Test hybrid pipeline | `python src/hybrid_rag.py` |
 | Test reranker pipeline | `python src/reranker_rag.py` |
+| Test query expansion pipeline | `python src/query_expansion.py` |
 | Evaluate reranker + so sánh | `python run_reranker_eval.py` |
+| Evaluate query expansion (combined) | `python run_query_expansion_eval.py` |
+| Evaluate query expansion (mode cụ thể) | `python run_query_expansion_eval.py --mode multi_query` |
 | Evaluate tất cả cùng lúc | `python src/evaluation.py` |
 
 ---
