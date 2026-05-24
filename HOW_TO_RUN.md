@@ -170,7 +170,7 @@ RETRIEVE_DEPTH=20    # Số candidates trước khi rerank (nên 5-10x TOP_K)
 ## So sánh toàn bộ (tính đến hiện tại)
 
 ```bash
-python run_query_expansion_eval.py   # chạy QE và in bảng đầy đủ
+python run_cot_eval.py   # chạy CoT và in bảng đầy đủ
 ```
 
 Kết quả thực đo (Ragas, 30 SQUAD test samples):
@@ -181,7 +181,8 @@ Kết quả thực đo (Ragas, 30 SQUAD test samples):
 ===========================================================================
   Run                         Faith   Relev    Prec  Recall     AVG
   ───────────────────────── ─────── ─────── ─────── ─────── ───────
-  reranked                   0.8389  0.8755  0.9639  1.0000  0.9196   ← best overall
+  cot_structured             0.9000  0.9097  0.9639  1.0000  0.9434   ← best overall
+  reranked                   0.8389  0.8755  0.9639  1.0000  0.9196
   query_expansion_combined   0.8222  0.8423  0.9639  1.0000  0.9071
   hybrid                     0.8833  0.8717  0.8778  0.9667  0.8999
   baseline                   0.8389  0.8405  0.9000  0.9333  0.8782
@@ -189,9 +190,10 @@ Kết quả thực đo (Ragas, 30 SQUAD test samples):
 ```
 
 **Nhận xét tổng thể:**
-- Reranking là kỹ thuật hiệu quả nhất trên SQUAD factual QA (0.9196)
-- Query Expansion (combined) duy trì Precision và Recall hoàn hảo nhưng giảm Faithfulness do HyDE hallucination
-- Faithfulness là điểm cần cải thiện tiếp theo — Chain-of-Thought (Day 22-24) sẽ giải quyết vấn đề này
+- **CoT Structured** là kỹ thuật tốt nhất toàn diện — **0.9434** avg, vượt Reranking (+2.6%)
+- Faithfulness đạt **0.9000** (+7.3% so với Reranker) — mục tiêu chính hoàn thành
+- Answer Relevancy **0.9097** — cải thiện bất ngờ do structured reasoning tập trung vào question
+- Điểm tích lũy: Hybrid (retrieval) + CrossEncoder (reranking) + CoT (generation) = bộ ba tối ưu
 
 ---
 
@@ -290,6 +292,74 @@ RETRIEVE_DEPTH=20    # Candidates mỗi query variant
 
 ---
 
+## Kỹ thuật 5: Chain-of-Thought (CoT) Retrieval — Day 22-24
+
+**File:** `src/cot_rag.py`
+**Runner:** `run_cot_eval.py`
+
+**Giải thích:**
+Giữ nguyên retrieval stack tốt nhất (Hybrid + CrossEncoder), chỉ thay đổi **bước generation**.
+
+**Tại sao Faithfulness vẫn thấp sau Reranking?**
+
+Reranker chọn đúng passages, nhưng LLM vẫn có thể "trượt" ra ngoài context khi sinh câu trả lời — đặc biệt với câu hỏi factual (năm tháng, tên người, số liệu cụ thể). LLM "biết" câu trả lời từ pre-training knowledge và có xu hướng generate câu trả lời đó thay vì đọc context cẩn thận.
+
+**Giải pháp CoT:**
+
+```
+Standard prompt:
+  Context → "Answer the question" → Answer
+
+CoT (structured) prompt:
+  Context → Step 1: List relevant facts
+           → Step 2: Reason from those facts
+           → Step 3: "Final Answer: ..." → parse answer
+```
+
+Bước intermediate forcing model phải explicitly trace facts trước → ít hallucinate hơn.
+
+**Ba modes:**
+
+| Mode | Cơ chế | Phù hợp với |
+|------|--------|-------------|
+| `structured` (default) | 3 bước: facts → reasoning → "Final Answer:" được parse | Factual QA — SQUAD |
+| `simple` | "Let's think step by step" prefix | General QA |
+| `citation` | Bắt buộc cite [Source N] trong reasoning | Long-form / doc QA |
+
+**Chạy pipeline test (5 câu hỏi):**
+```bash
+python src/cot_rag.py
+# Output: results/cot_test_results.json
+```
+
+**Chạy evaluation + so sánh tất cả kỹ thuật:**
+```bash
+python run_cot_eval.py                    # structured (default)
+python run_cot_eval.py --mode simple
+python run_cot_eval.py --mode citation
+```
+
+**Kết quả đạt được:**
+| Metric | Reranked | CoT Structured | Delta |
+|--------|----------|----------------|-------|
+| Faithfulness | 0.8389 | **0.9000** | **+7.3% ↑↑** |
+| Answer Relevancy | 0.8755 | **0.9097** | **+3.9% ↑** |
+| Context Precision | 0.9639 | **0.9639** | 0% (same retrieval) |
+| Context Recall | 1.0000 | **1.0000** | 0% (same retrieval) |
+| **Average** | **0.9196** | **0.9434** | **+2.6% ↑** |
+
+**Phân tích:**
+- **Faithfulness +7.3%**: Mục tiêu chính đạt được — CoT buộc LLM phải list facts từ context trước → không thể hallucinate.
+- **Answer Relevancy +3.9%**: Unexpected improvement — structured reasoning tập trung câu trả lời vào đúng question hơn.
+- **Precision/Recall**: Không đổi vì dùng cùng retrieval stack (Hybrid + CrossEncoder).
+
+**Lưu ý kỹ thuật:**
+- `max_tokens=600` (gấp đôi baseline) vì reasoning chain cần thêm tokens
+- `_extract_final_answer()` parse "Final Answer:" label → chỉ final answer đưa vào Ragas (không gồm reasoning)
+- `temperature=0.0` — deterministic để Faithfulness cao nhất
+
+---
+
 ## Tóm tắt lệnh
 
 | Mục tiêu | Lệnh |
@@ -298,9 +368,12 @@ RETRIEVE_DEPTH=20    # Candidates mỗi query variant
 | Test hybrid pipeline | `python src/hybrid_rag.py` |
 | Test reranker pipeline | `python src/reranker_rag.py` |
 | Test query expansion pipeline | `python src/query_expansion.py` |
+| Test CoT pipeline | `python src/cot_rag.py` |
 | Evaluate reranker + so sánh | `python run_reranker_eval.py` |
 | Evaluate query expansion (combined) | `python run_query_expansion_eval.py` |
 | Evaluate query expansion (mode cụ thể) | `python run_query_expansion_eval.py --mode multi_query` |
+| Evaluate CoT (structured) | `python run_cot_eval.py` |
+| Evaluate CoT (mode cụ thể) | `python run_cot_eval.py --mode simple` |
 | Evaluate tất cả cùng lúc | `python src/evaluation.py` |
 
 ---

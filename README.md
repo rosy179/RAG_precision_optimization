@@ -20,7 +20,8 @@ RAG_prescision_optimization/
 │   ├── evaluation.py              # Day 3-4: Ragas evaluation framework
 │   ├── hybrid_rag.py              # Day 8-10: BM25 + Semantic hybrid search + RRF
 │   ├── reranker_rag.py            # Day 11-13: CrossEncoder reranking layer
-│   └── query_expansion.py        # Day 15-17: Multi-Query + HyDE expansion
+│   ├── query_expansion.py        # Day 15-17: Multi-Query + HyDE expansion
+│   └── cot_rag.py                # Day 22-24: Chain-of-Thought generation
 │
 ├── notebooks/                     # Jupyter notebooks (optional exploration)
 │
@@ -36,6 +37,7 @@ RAG_prescision_optimization/
 │
 ├── run_reranker_eval.py           # Run + evaluate Reranker pipeline
 ├── run_query_expansion_eval.py    # Run + evaluate Query Expansion pipeline
+├── run_cot_eval.py                # Run + evaluate Chain-of-Thought pipeline
 ├── collect_dataset.py             # Data collection: SQUAD + Wikipedia
 ├── collect_arxiv.py               # Data collection: ArXiv papers (with retry)
 ├── collect_arxiv_hf.py            # Data collection: ArXiv via HuggingFace datasets
@@ -93,8 +95,8 @@ python run_reranker_eval.py
 | **Week 1** | Baseline RAG + Evaluation Framework | ✅ Complete | 0.8782 |
 | **Week 2a** | Hybrid Search (BM25 + Semantic + RRF) | ✅ Complete | 0.8999 |
 | **Week 2b** | Reranking (CrossEncoder) | ✅ Complete | **0.9196** |
-| **Week 3** | Query Expansion (Multi-Query + HyDE) | ✅ Complete | ~0.93+ |
-| **Week 4** | Chain-of-Thought Retrieval | ⬜ Pending | ~0.95+ |
+| **Week 3** | Query Expansion (Multi-Query + HyDE) | ✅ Complete | 0.9071 |
+| **Week 4** | Chain-of-Thought (CoT) Generation | ✅ Complete | **0.9434** |
 | **Week 5-6** | Documentation + Presentation | ⬜ Pending | — |
 
 ---
@@ -107,6 +109,7 @@ python run_reranker_eval.py
 | + Hybrid Search | 0.8833 | 0.8717 | 0.8778 | 0.9667 | 0.8999 |
 | + Reranking | 0.8389 | 0.8755 | **0.9639** | **1.0000** | **0.9196** |
 | + Query Expansion (combined) | 0.8222 | 0.8423 | **0.9639** | **1.0000** | 0.9071 |
+| + CoT Structured | **0.9000** | **0.9097** | **0.9639** | **1.0000** | **0.9434** |
 | **Final (ALL)** | — | — | — | — | ~0.95+ |
 
 ---
