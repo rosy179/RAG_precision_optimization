@@ -46,6 +46,8 @@ RAG_prescision_optimization/
 ├── requirements.txt
 ├── .env.example                   # Copy to .env and add API keys
 ├── HOW_TO_RUN.md                  # Step-by-step guide for each technique
+├── RESEARCH_REPORT.md             # Full research report (Vietnamese)
+├── PRESENTATION_SLIDES.md         # Marp presentation slides (15 slides)
 └── README.md
 ```
 
@@ -97,7 +99,7 @@ python run_reranker_eval.py
 | **Week 2b** | Reranking (CrossEncoder) | ✅ Complete | **0.9196** |
 | **Week 3** | Query Expansion (Multi-Query + HyDE) | ✅ Complete | 0.9071 |
 | **Week 4** | Chain-of-Thought (CoT) Generation | ✅ Complete | **0.9434** |
-| **Week 5-6** | Documentation + Presentation | ⬜ Pending | — |
+| **Week 5-6** | Documentation + Presentation | ✅ Complete | — |
 
 ---
 
