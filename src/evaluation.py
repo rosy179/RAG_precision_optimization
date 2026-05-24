@@ -106,9 +106,7 @@ def run_ragas_evaluation(eval_data: dict, run_name="baseline") -> dict:
 
         def safe_mean(values):
             clean_values = [v for v in values if v is not None]
-            if not clean_values:
-                return 0.0
-            return sum(clean_values) / len(clean_values)
+            return sum(clean_values) / len(clean_values) if clean_values else 0.0
 
         results = {
             "run_name":          run_name,
@@ -257,5 +255,16 @@ if __name__ == "__main__":
     display_results(reranker_metrics)
     save_results(reranker_metrics)
 
-    # 4. Show Comparison
+    # 4. Run Query Expansion Evaluation
+    print("\n" + "="*55)
+    print("  4. RUNNING QUERY EXPANSION RAG EVALUATION")
+    print("="*55)
+    from query_expansion import QueryExpansionRAG
+    qe_rag = QueryExpansionRAG(mode="combined", n_queries=3).build()
+    qe_eval_data = build_eval_dataset(qe_rag, n_samples=30)
+    qe_metrics = run_ragas_evaluation(qe_eval_data, run_name="query_expansion_combined")
+    display_results(qe_metrics)
+    save_results(qe_metrics)
+
+    # 5. Show Comparison
     compare_runs()
