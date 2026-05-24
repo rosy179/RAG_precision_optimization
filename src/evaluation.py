@@ -266,5 +266,16 @@ if __name__ == "__main__":
     display_results(qe_metrics)
     save_results(qe_metrics)
 
-    # 5. Show Comparison
+    # 5. Run Chain-of-Thought Evaluation
+    print("\n" + "="*55)
+    print("  5. RUNNING CHAIN-OF-THOUGHT RAG EVALUATION")
+    print("="*55)
+    from cot_rag import ChainOfThoughtRAG
+    cot_rag = ChainOfThoughtRAG(mode="structured").build()
+    cot_eval_data = build_eval_dataset(cot_rag, n_samples=30)
+    cot_metrics = run_ragas_evaluation(cot_eval_data, run_name="cot_structured")
+    display_results(cot_metrics)
+    save_results(cot_metrics)
+
+    # 6. Show Comparison
     compare_runs()
