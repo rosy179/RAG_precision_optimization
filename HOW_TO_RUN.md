@@ -360,6 +360,86 @@ python run_cot_eval.py --mode citation
 
 ---
 
+---
+
+## Kỹ thuật 6: Multilingual RAG — Vietnamese, Japanese & 100+ ngôn ngữ
+
+**File:** `src/multilingual_rag.py`
+**Runner:** `run_multilingual_demo.py`
+
+**Vấn đề với input không phải tiếng Anh:**
+
+| Tầng | Tiếng Việt | Tiếng Nhật/Trung |
+|------|-----------|-----------------|
+| BM25 tokenizer (`split()`) | ~OK (có space) | ❌ FAIL (không có space) |
+| `text-embedding-ada-002` | ~65% quality | ~55% quality |
+| `ms-marco` CrossEncoder | ~30% accuracy | ~20% accuracy |
+| CoT response language | Trả lời tiếng Anh | Trả lời tiếng Anh |
+| **Ước tính quality** | **~0.65–0.72** | **~0.40–0.55** |
+
+**Hai strategy cải thiện:**
+
+**Strategy "translate"** — Nhanh, dùng lại index tiếng Anh:
+```
+Input (VI/JA) → GPT-4o-mini dịch → English query
+  → Existing CoT pipeline → English answer
+  → GPT-4o-mini dịch ngược → Answer (VI/JA)
+```
+
+**Strategy "multilingual"** — Chất lượng cao, không cần dịch:
+```
+Input (VI/JA) → multilingual-e5-small embed (100+ ngôn ngữ)
+  → Hybrid Retrieve (BM25 bigrams cho CJK)
+  → mmarco CrossEncoder (13 ngôn ngữ: VI, JA, ZH, KO...)
+  → CoT prompt "respond in Vietnamese/Japanese"
+  → Answer (VI/JA) trực tiếp
+```
+
+**Models (tự download qua sentence-transformers):**
+- Embedding: `intfloat/multilingual-e5-small` (~117MB, 100+ ngôn ngữ)
+- CrossEncoder: `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (~120MB, 13 ngôn ngữ)
+
+**Chạy demo:**
+```bash
+# Cả 2 strategy + cả 2 ngôn ngữ (3 câu hỏi mỗi ngôn ngữ)
+python run_multilingual_demo.py
+
+# Chỉ translate strategy, tiếng Việt
+python run_multilingual_demo.py --strategy translate --lang vi --n 3
+
+# Chỉ multilingual strategy, tiếng Nhật
+python run_multilingual_demo.py --strategy multilingual --lang ja --n 3
+
+# So sánh 2 strategy side-by-side
+python run_multilingual_demo.py --strategy compare --lang vi
+
+# Xem bảng phân tích kỹ thuật
+python run_multilingual_demo.py --analysis
+```
+
+**Kết quả thực tế (demo output):**
+
+| Câu hỏi (VI) | Strategy | Answer |
+|---|---|---|
+| "RAG là gì và hoạt động như thế nào?" | translate | Câu trả lời đầy đủ, tự nhiên ✅ |
+| "Sự khác biệt BM25 và semantic search?" | multilingual | Câu trả lời súc tích, đúng ✅ |
+| "RAGとはどのような技術ですか？" (JA) | translate | 自然な日本語の回答 ✅ |
+| "BM25とセマンティック検索の違いは？" (JA) | multilingual | 正確な日本語 ✅ |
+
+**Reranker score so sánh (Japanese "RAG とは？"):**
+- ms-marco (English-only): `4.131` → score thấp, ít confidence
+- mmarco (multilingual): `6.089` → score cao hơn, trained trên Japanese ✅
+
+**Lộ trình khuyến nghị (7 ngày cho production):**
+```
+Ngày 1:   Response language matching (fix UX ngay lập tức)
+Ngày 2-3: Strategy "translate" (quick win, mọi ngôn ngữ)
+Ngày 4-6: Strategy "multilingual" (embedding + CrossEncoder)
+Ngày 7:   Đo Ragas metrics với multilingual test set
+```
+
+---
+
 ## Tóm tắt lệnh
 
 | Mục tiêu | Lệnh |
@@ -375,6 +455,8 @@ python run_cot_eval.py --mode citation
 | Evaluate CoT (structured) | `python run_cot_eval.py` |
 | Evaluate CoT (mode cụ thể) | `python run_cot_eval.py --mode simple` |
 | Evaluate tất cả cùng lúc | `python src/evaluation.py` |
+| Demo multilingual (VI + JA) | `python run_multilingual_demo.py` |
+| Demo multilingual (strategy so sánh) | `python run_multilingual_demo.py --strategy compare --lang vi` |
 
 ---
 

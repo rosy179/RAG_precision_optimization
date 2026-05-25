@@ -6,7 +6,7 @@
 **Duration:** 45 days  
 **Tools:** LlamaIndex + LangChain + Ragas  
 **Target:** 85-90% success rate  
-**Deliverables:** Working code + Evaluation report + Best practices  
+**Deliverables:** Working code + Evaluation report + Best practices
 
 ---
 
@@ -14,10 +14,12 @@
 
 ## 📅 WEEK 1: FOUNDATION & BASELINE (Days 1-7)
 
-### Goal: 
+### Goal:
+
 Setup baseline RAG system + understand evaluation metrics
 
 ### Day 1: Project Setup
+
 **Deliverable:** Working environment + sample data
 
 ```python
@@ -35,6 +37,7 @@ Output: Working dev environment + dataset ready
 ```
 
 ### Day 2: Baseline RAG Implementation
+
 **Deliverable:** Simple RAG pipeline (retrieve + generate)
 
 ```python
@@ -63,6 +66,7 @@ Output: Baseline RAG working, can answer basic queries
 ```
 
 ### Days 3-4: Evaluation Framework Setup
+
 **Deliverable:** Ragas evaluation pipeline + baseline metrics
 
 ```python
@@ -103,6 +107,7 @@ Output: Baseline metrics established, evaluation pipeline ready
 ```
 
 ### Days 5-7: Documentation + Buffer
+
 **Deliverable:** Initial project documentation
 
 ```
@@ -125,6 +130,7 @@ Output: Clear baseline understanding
 Goal: Implement techniques to improve retrieval quality
 
 ### Day 8-10: Technique #1 - Hybrid Search
+
 **Deliverable:** Hybrid search implementation (BM25 + semantic)
 
 ```python
@@ -136,13 +142,13 @@ Expected improvement: +0.05-0.10 on context precision
 Implementation:
 ✅ BM25 retriever (keyword-based)
   from llama_index.retrievers import BM25Retriever
-  
+
 ✅ Semantic retriever (vector-based)
   from llama_index.retrievers import VectorIndexRetriever
-  
+
 ✅ Hybrid combiner (RRF - Reciprocal Rank Fusion)
   from llama_index.retrievers import QueryFusionRetriever
-  
+
 Combined retriever = BM25 (weight 0.5) + Semantic (weight 0.5)
 
 Evaluation:
@@ -155,6 +161,7 @@ Output: Hybrid search working + eval results
 ```
 
 ### Day 11-13: Technique #2 - Reranking
+
 **Deliverable:** Reranking layer implementation
 
 ```python
@@ -169,7 +176,7 @@ Implementation:
   from sentence_transformers import CrossEncoder
   model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
   scores = model.predict([[query, doc] for doc in docs])
-  
+
 ✅ Keep top_k=3 reranked docs for generation
 
 Two options:
@@ -188,6 +195,7 @@ Output: Reranking pipeline working + comparative eval
 ```
 
 ### Day 14: Testing + Quick Wins
+
 **Deliverable:** Techniques tuned, metrics improved
 
 ```
@@ -212,6 +220,7 @@ Expected metrics after Week 2:
 Goal: Improve answer quality through prompt and query techniques
 
 ### Day 15-17: Technique #3 - Query Expansion
+
 **Deliverable:** Query expansion for better retrieval
 
 ```python
@@ -223,7 +232,7 @@ Expected improvement: +0.06-0.10 on faithfulness
 Implementation:
 ✅ Given query, generate 3-5 alternative queries
   Prompt: "Generate 5 different ways to phrase this question"
-  
+
 ✅ Retrieve for each variant
 ✅ Merge results (deduplicate by doc ID)
 ✅ Pass merged context to generation
@@ -250,6 +259,7 @@ Output: Query expansion working + eval
 ```
 
 ### Day 18-20: Technique #4 - Adaptive Context Management
+
 **Deliverable:** Smart chunk sizing and context window optimization
 
 ```python
@@ -262,15 +272,15 @@ Implementation:
 ✅ Dynamic chunk size based on query:
   - Simple query → small chunks (200 tokens)
   - Complex query → larger chunks (800 tokens)
-  
+
 ✅ Dynamic top_k:
   - Factual query → top_k=3 (more focused)
   - Open-ended query → top_k=5 (more breadth)
-  
+
 ✅ Context filtering:
   - Remove low-scoring docs
   - Merge adjacent high-scoring docs
-  
+
 Evaluation:
 - Measure: faithfulness + answer_relevance
 - Expected: +0.07-0.12
@@ -280,6 +290,7 @@ Output: Adaptive retrieval working
 ```
 
 ### Day 21: Integration + Testing
+
 **Deliverable:** All techniques combined and tuned
 
 ```
@@ -306,6 +317,7 @@ Evaluation on full test set (100 QA pairs):
 Goal: Add advanced techniques + comprehensive evaluation
 
 ### Day 22-24: Technique #5 - Chain-of-Thought Retrieval
+
 **Deliverable:** CoT-based retrieval for complex queries
 
 ```python
@@ -317,13 +329,13 @@ Expected improvement: +0.05-0.08 on answer_relevance
 Implementation:
 ✅ For complex queries, decompose into sub-questions:
   Main: "How do I optimize database queries in production?"
-  
+
   Sub-queries:
   1. "What are database query optimization techniques?"
   2. "How to profile slow queries?"
   3. "What are indexing strategies?"
   4. "How to monitor query performance?"
-  
+
 ✅ Retrieve for each sub-question
 ✅ Combine all context
 ✅ Generate comprehensive answer
@@ -341,6 +353,7 @@ Output: CoT retrieval for complex queries
 ```
 
 ### Day 25-26: Advanced Technique (Optional) - Knowledge Graph
+
 **Deliverable:** Knowledge graph integration (if time allows)
 
 ```python
@@ -364,6 +377,7 @@ Focus on Days 25-26 for testing + refinement instead
 ```
 
 ### Day 27-28: Comprehensive Evaluation & Comparison
+
 **Deliverable:** Side-by-side comparison report
 
 ```python
@@ -397,6 +411,7 @@ Comparison table:
 Goal: Create comprehensive guide + beautiful report
 
 ### Days 29-31: Best Practices Guide
+
 **Deliverable:** Actionable guide for implementing RAG precision
 
 ```
@@ -443,6 +458,7 @@ Total: 40-50 page comprehensive guide
 ```
 
 ### Days 32-33: Evaluation Report
+
 **Deliverable:** Detailed eval report with metrics + insights
 
 ```
@@ -481,6 +497,7 @@ Total: 15-20 pages
 ```
 
 ### Days 34-35: Demo Video + Polish
+
 **Deliverable:** 5-7 minute demo video + slides
 
 ```
@@ -518,6 +535,7 @@ Script (write it first):
 Goal: Final refinement + prepare for company presentation
 
 ### Days 36-38: Code Cleanup + Publishing
+
 **Deliverable:** Production-ready code repository
 
 ```
@@ -529,7 +547,7 @@ Tasks:
    - How to run baseline
    - How to evaluate
    - How to add new techniques
-   
+
 ✅ Requirements.txt: exact versions
 ✅ Sample config files for each technique
 ✅ Unit tests for key functions
@@ -537,40 +555,44 @@ Tasks:
 
 Repo structure:
 ```
+
 rag-precision-optimization/
 ├── README.md
 ├── requirements.txt
 ├── config/
-│   ├── baseline.yaml
-│   ├── hybrid_search.yaml
-│   ├── reranking.yaml
-│   └── full_pipeline.yaml
+│ ├── baseline.yaml
+│ ├── hybrid_search.yaml
+│ ├── reranking.yaml
+│ └── full_pipeline.yaml
 ├── data/
-│   ├── documents/
-│   └── test_queries.json
+│ ├── documents/
+│ └── test_queries.json
 ├── src/
-│   ├── baseline_rag.py
-│   ├── hybrid_retriever.py
-│   ├── reranker.py
-│   ├── query_expansion.py
-│   ├── evaluation.py
-│   └── utils.py
+│ ├── baseline_rag.py
+│ ├── hybrid_retriever.py
+│ ├── reranker.py
+│ ├── query_expansion.py
+│ ├── evaluation.py
+│ └── utils.py
 ├── notebooks/
-│   ├── 01_baseline.ipynb
-│   ├── 02_hybrid_search.ipynb
-│   ├── 03_reranking.ipynb
-│   ├── 04_query_expansion.ipynb
-│   └── 05_evaluation.ipynb
+│ ├── 01_baseline.ipynb
+│ ├── 02_hybrid_search.ipynb
+│ ├── 03_reranking.ipynb
+│ ├── 04_query_expansion.ipynb
+│ └── 05_evaluation.ipynb
 ├── results/
-│   ├── baseline_metrics.json
-│   ├── technique_comparison.csv
-│   └── evaluation_report.pdf
+│ ├── baseline_metrics.json
+│ ├── technique_comparison.csv
+│ └── evaluation_report.pdf
 └── tests/
-    └── test_core.py
+└── test_core.py
+
 ```
+
 ```
 
 ### Days 39-41: Presentation Preparation
+
 **Deliverable:** Japanese presentation + slides
 
 ```
@@ -590,7 +612,7 @@ Presentation (30 minutes):
 8:00-25:00   Solution: 5 techniques
               Each technique: concept → implementation → result
               Show progression of improvement
-              
+
 25:00-27:00  Final comparison
               All techniques together: 0.83 faithfulness
               Trade-off: accuracy vs latency vs cost
@@ -609,6 +631,7 @@ Slides: 25-30 slides total
 ```
 
 ### Days 42-44: Final Testing + Optimization
+
 **Deliverable:** Bug-free, optimized system
 
 ```
@@ -618,23 +641,24 @@ Tasks:
    - Latency bottlenecks?
    - Memory usage?
    - API cost optimization?
-   
+
 ✅ Edge case testing:
    - Very long queries
    - Very short queries
    - Ambiguous queries
    - Technical queries
    - Casual queries
-   
+
 ✅ Final tuning:
    - Top_k parameters
    - Chunk sizes
    - Reranker threshold
-   
+
 ✅ Create "quick start" guide for company team
 ```
 
 ### Day 45: Final Polish + Presentation Day
+
 **Deliverable:** Ready for company presentation
 
 ```
@@ -656,6 +680,7 @@ Day 45 tasks:
 At Day 45, you will have:
 
 ### 📦 **Code**
+
 - ✅ Working RAG system with 5 techniques
 - ✅ Clean, documented, copy-paste ready code
 - ✅ Configuration files for each technique
@@ -663,24 +688,28 @@ At Day 45, you will have:
 - ✅ Jupyter notebooks for learning
 
 ### 📊 **Documentation**
+
 - ✅ 40-50 page "Best Practices Guide"
 - ✅ 15-20 page "Evaluation Report"
 - ✅ README + quickstart guide
 - ✅ Troubleshooting documentation
 
 ### 🎥 **Presentation**
+
 - ✅ 5-7 minute demo video
 - ✅ 30-minute company presentation
 - ✅ 25-30 slides (visual, not text-heavy)
 - ✅ Printed handouts (if needed)
 
 ### 📈 **Metrics**
+
 - ✅ Baseline: 0.68 faithfulness
 - ✅ Final: 0.83 faithfulness (+22%)
 - ✅ Cost analysis: tokens, latency, accuracy trade-offs
 - ✅ Comparative table: all techniques side-by-side
 
 ### 🎁 **Extra Value**
+
 - ✅ Company can immediately implement
 - ✅ Each technique is independent (not complex orchestration)
 - ✅ Clear decision tree: "use this technique for X use case"
@@ -693,21 +722,27 @@ At Day 45, you will have:
 By day 45, you should be able to tell company:
 
 ✅ **"We tested 5 advanced RAG techniques"**
+
 - Hybrid search, reranking, query expansion, adaptive context, CoT retrieval
 
 ✅ **"We improved accuracy by 22%"**
+
 - From 0.68 to 0.83 faithfulness (concrete number)
 
 ✅ **"Here's the implementation guide"**
+
 - 40-50 pages, step-by-step, copy-paste ready
 
 ✅ **"Here's when to use which technique"**
+
 - Decision tree for different use cases
 
 ✅ **"We've measured the trade-offs"**
+
 - Accuracy vs latency vs cost analysis
 
 ✅ **"Your team can implement this tomorrow"**
+
 - Clean code, documentation, working example
 
 ---
@@ -717,39 +752,20 @@ By day 45, you should be able to tell company:
 **Timeline is 45 days. What if you get behind?**
 
 ### If behind by Day 15:
+
 - Skip Technique #5 (CoT) - focus on core 4
 - Still deliver value, just less techniques tested
 
 ### If behind by Day 25:
+
 - Reduce evaluation dataset from 100 to 50 QA pairs
 - Focus on 3-4 best techniques
 - Still deliver meaningful results
 
 ### If behind by Day 35:
+
 - Demo video becomes text summary
 - Slides become comprehensive
 - Still deliver all core value
 
 **This schedule is designed to always deliver 80%+ of value even if you slip 3-5 days.**
-
----
-
-## CONFIDENCE LEVEL
-
-**Timeline confidence: 85-90%** ✅
-
-Why:
-- Each technique is independent
-- LlamaIndex + LangChain are well-documented
-- Ragas evaluation is straightforward
-- You already know the tools
-- Clear milestones to track progress
-- Built-in buffer days (week 6)
-
-This is FAR safer than Theme 01 (orchestration) which is 50-60% confidence.
-
----
-
-**🎯 START DAY 1: Setup environment + baseline RAG**
-
-**Ready to go? Let's build this! 🚀**
