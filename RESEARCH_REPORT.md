@@ -82,12 +82,14 @@ Phân loại query theo độ phức tạp → điều chỉnh retrieval config:
 
 | Nguồn | Số lượng | Nội dung |
 |-------|----------|---------|
-| SQUAD v1.1 | 150 QA pairs | Factual QA + ground truth |
+| SQUAD v1.1 | 150 QA pairs | Factual QA — miền **University of Notre Dame** |
 | Wikipedia | 15 articles | ML, DL, NLP, Transformer, RAG, Vector DB |
 | ArXiv | 10 abstracts | RAG, DPR, RAGAS, Self-RAG, HyDE, SBERT |
 | **Tổng** | **56 documents** | ~750K ký tự |
 
 **Split:** 70% train (105 QA) / 30% test (45 QA, 30 dùng cho eval)
+
+> **Lưu ý thiết kế:** Câu hỏi đánh giá thuộc miền *University of Notre Dame* (SQUAD), khác với tài liệu corpus (AI/ML). Context chứa câu trả lời được merge sẵn vào corpus bởi `align_dataset.py` — xem mục **Hạn Chế** để hiểu ảnh hưởng đến điểm số.
 
 ### 3.2 Models & Config
 
@@ -122,7 +124,7 @@ Phân loại query theo độ phức tạp → điều chỉnh retrieval config:
 |----------|:---:|:---:|:---:|:---:|:---:|
 | Baseline RAG | 0.8389 | 0.8405 | 0.9000 | 0.9333 | 0.8782 |
 | + Hybrid Search | 0.8833 | 0.8717 | 0.8778 | 0.9667 | 0.8999 |
-| + Reranking | 0.8389 | 0.8755 | **0.9639** | **1.0000** | 0.9196 |
+| + Reranking | 0.8056 | 0.8779 | **0.9639** | **1.0000** | 0.9118 |
 | + Query Expansion | 0.8222 | 0.8423 | **0.9639** | **1.0000** | 0.9071 |
 | + Adaptive Retrieval | 0.8333 | 0.8939 | **0.9639** | **1.0000** | 0.9228 |
 | + **CoT Structured** | **0.9000** | **0.9097** | **0.9639** | **1.0000** | **0.9434** |
@@ -131,7 +133,7 @@ Phân loại query theo độ phức tạp → điều chỉnh retrieval config:
 
 **Hybrid Search (+2.5%):** BM25 kéo về đúng documents chứa keyword. Context Precision giảm nhẹ 2.5% — trade-off bình thường khi mang về nhiều candidate hơn.
 
-**CrossEncoder Reranking (+2.2%):** Context Precision phục hồi 0.9639 (+8.6% vs hybrid), Context Recall đạt 1.0000 hoàn hảo. CrossEncoder joint-encode (query, passage) → chính xác hơn bi-encoder.
+**CrossEncoder Reranking (+1.3%):** Context Precision phục hồi 0.9639 (+8.6% vs hybrid), Context Recall đạt 1.0000 hoàn hảo. CrossEncoder joint-encode (query, passage) → chính xác hơn bi-encoder. Faithfulness giảm nhẹ (0.8833 → 0.8056) do CrossEncoder đưa vào context khác baseline — LLM đôi khi generate ngoài context được cung cấp.
 
 **Query Expansion (−1.4%):** Regression do HyDE hallucinate facts trong hypothetical answer:
 ```
@@ -153,8 +155,8 @@ QE phù hợp open-ended queries, không phải factual QA.
 ```
 Baseline                  0.8782
 + Hybrid Search  +0.0217  0.8999   retrieval breadth
-+ Reranking      +0.0197  0.9196   retrieval precision  
-+ CoT Generation +0.0238  0.9434   generation quality
++ Reranking      +0.0119  0.9118   retrieval precision
++ CoT Generation +0.0316  0.9434   generation quality
 ─────────────────────────────────
 Total            +0.0652  +7.4%
 ```
@@ -217,13 +219,34 @@ A (multilingual): "RAGは、大規模言語モデルが外部データソース�
 | Ngày | Task | Impact |
 |------|------|--------|
 | 1 | Response language matching | Fix UX ngay |
-| 2-3 | Strategy "translate" | VI ~0.85, JA ~0.83 |
+| 2-3 | Strategy "translate" | VI ~0.85, JA ~0.83 *(ước tính)* |
 | 4-6 | multilingual-e5-small embedding | Core quality fix |
-| 7 | mmarco CrossEncoder | VI ~0.90, JA ~0.87 |
+| 7 | mmarco CrossEncoder | VI ~0.90, JA ~0.87 *(ước tính)* |
 
 ---
 
-## 6. Kết Luận
+## 6. Hạn Chế Của Nghiên Cứu (Limitations)
+
+### 6.1 Data Leakage — Context được merge vào corpus
+
+Script `align_dataset.py` lấy chính đoạn context của từng câu hỏi SQUAD và thêm vào danh sách documents của corpus. Do đó, **document chứa câu trả lời luôn có mặt khi retrieval**. Đây là lý do trực tiếp khiến:
+
+- Context Recall đạt **1.0000** (hoàn hảo) ở mọi pipeline có reranker
+- Baseline đã đạt **0.9333 Recall** — cao bất thường với một pipeline vanilla
+
+Con số **0.9434** (CoT avg) là **optimistic upper bound**, không phải hiệu năng kỳ vọng khi triển khai trên corpus thực tế không được căn chỉnh sẵn. Cần đánh giá bổ sung với distractor documents để có số liệu phản ánh production.
+
+### 6.2 Domain mismatch — SQUAD vs corpus AI/ML
+
+150 câu hỏi SQUAD được lấy từ phần *University of Notre Dame* (lịch sử, thể thao, học thuật). Documents corpus lại là AI/ML (Wikipedia + ArXiv abstracts). Câu hỏi chỉ trả lời được vì context SQUAD đã được merge sẵn vào corpus (xem 6.1). Mô tả "56 documents AI/ML" không phản ánh đầy đủ sự lệch miền này.
+
+### 6.3 Điểm multilingual là ước tính, chưa đo bằng Ragas
+
+Các con số tiếng Việt (~0.85, ~0.90) và tiếng Nhật (~0.83, ~0.87) trong bảng lộ trình triển khai Section 5.3 là **ước tính kỹ thuật**, chưa được đo bằng Ragas trên tập test thực tế.
+
+---
+
+## 7. Kết Luận
 
 Nghiên cứu chứng minh 3 kỹ thuật kết hợp — **Hybrid Search + CrossEncoder + Chain-of-Thought** — đạt avg Ragas **0.9434** trên SQUAD, cải thiện **+7.4%** so với baseline.
 

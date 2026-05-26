@@ -147,11 +147,11 @@ python run_reranker_eval.py
 **Kết quả đạt được:**
 | Metric | Hybrid | Reranked | Delta |
 |--------|--------|----------|-------|
-| Faithfulness | 0.8833 | 0.8389 | -5.0% |
-| Answer Relevancy | 0.8717 | 0.8755 | +0.4% ↑ |
+| Faithfulness | 0.8833 | 0.8056 | -8.8% |
+| Answer Relevancy | 0.8717 | 0.8779 | +0.7% ↑ |
 | Context Precision | 0.8778 | **0.9639** | **+8.6% ↑↑** |
 | Context Recall | 0.9667 | **1.0000** | **+3.3% ↑** |
-| **Average** | **0.8999** | **0.9196** | **+2.2%** |
+| **Average** | **0.8999** | **0.9118** | **+1.3%** |
 
 **Phân tích:**
 - **Context Precision +8.6%**: Mục tiêu chính đạt được — CrossEncoder loại bỏ noise hiệu quả.
@@ -182,7 +182,7 @@ Kết quả thực đo (Ragas, 30 SQUAD test samples):
   Run                         Faith   Relev    Prec  Recall     AVG
   ───────────────────────── ─────── ─────── ─────── ─────── ───────
   cot_structured             0.9000  0.9097  0.9639  1.0000  0.9434   ← best overall
-  reranked                   0.8389  0.8755  0.9639  1.0000  0.9196
+  reranked                   0.8056  0.8779  0.9639  1.0000  0.9118
   query_expansion_combined   0.8222  0.8423  0.9639  1.0000  0.9071
   hybrid                     0.8833  0.8717  0.8778  0.9667  0.8999
   baseline                   0.8389  0.8405  0.9000  0.9333  0.8782

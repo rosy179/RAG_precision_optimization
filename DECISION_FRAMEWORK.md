@@ -22,7 +22,7 @@ START: I want to deploy a RAG system
 │   ├── Simple factual ("Who is X?", "What year?")
 │   │   → Hybrid is sufficient (0.90 accuracy)
 │   ├── Multi-hop reasoning ("Why did X cause Y?")
-│   │   → Reranker helps (0.92 accuracy)
+│   │   → Reranker helps (0.91 accuracy)
 │   └── Complex / hallucination-risk ("Explain the mechanism of...")
 │       → CoT is best (0.94 accuracy)
 │
@@ -57,7 +57,7 @@ Technique         │ Adds to Baseline  │ Cumulative  │ Cost multiplier
 ──────────────────┼───────────────────┼─────────────┼────────────────
 Baseline          │ —                 │ 0.8782      │ 1.0x
 + Hybrid Search   │ +0.0217 (+2.5%)   │ 0.8999      │ 1.1x
-+ Reranker        │ +0.0197 (+2.2%)   │ 0.9196      │ 1.1x
++ Reranker        │ +0.0119 (+1.3%)   │ 0.9118      │ 1.1x
 + CoT             │ +0.0238 (+2.6%)   │ 0.9434      │ 2.8x
 + Query Expansion │ -0.0125 (hurts)   │ 0.9071      │ 3.0x (avoid solo)
 ```
@@ -148,7 +148,7 @@ Accuracy │
   0.94 ──┤
          │
   0.93 ──┤
-         │          ● Reranked
+         │     ● Reranked
   0.92 ──┤
          │
   0.91 ──┤
@@ -160,11 +160,13 @@ Accuracy │
   0.88 ──● Baseline
          │
          └──────────────────────────────────────
-            $0.00006  $0.00007  $0.00020  $0.00019
+            $0.00006  $0.00007  $0.00019  $0.00020
                        Cost per query (USD)
+                             ↑
+                  QE at ~$0.000195 (3x overhead)
 
 Pareto front: Baseline → Hybrid → Reranked → CoT
-(Query Expansion is off the Pareto front — high cost, lower accuracy)
+(Query Expansion is off the Pareto front — high cost ~$0.000195, lower accuracy 0.9071)
 ```
 
 ---
@@ -183,14 +185,15 @@ A: For precision-focused use cases, yes. Query Expansion excels when you need hi
    (finding all relevant docs). Combine with Reranker to recover precision.
 
 **Q: What's the minimum setup for a production deployment?**
-A: `Hybrid + Reranker` (`config/production.yaml` with `use_cot: false`) gives 0.92 accuracy
+A: `Hybrid + Reranker` (`config/production.yaml` with `use_cot: false`) gives 0.91 accuracy
    at ~950ms latency and is the most cost-effective production configuration.
 
 **Q: How many queries can I serve per dollar?**
 
-| Technique | Queries per $1 |
-|-----------|:--------------:|
-| Baseline | ~17,500 |
-| Hybrid | ~15,400 |
-| Reranked | ~15,400 |
-| CoT | ~5,500 |
+| Technique | Cost/query | Queries per $1 |
+|-----------|:----------:|:--------------:|
+| Baseline | ~$0.000057 | ~17,500 |
+| Hybrid | ~$0.000065 | ~15,400 |
+| Reranked | ~$0.000065 | ~15,400 |
+| Query Expansion | ~$0.000195 | ~5,100 |
+| CoT | ~$0.000181 | ~5,500 |

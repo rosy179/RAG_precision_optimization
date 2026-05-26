@@ -55,7 +55,7 @@ Accuracy │
 |-----------|:--------:|:-------------:|:----------:|----------|
 | Baseline | 0.8782 | ~520ms | ~$0.000057 | Demo, budget-constrained |
 | Hybrid | 0.8999 | ~680ms | ~$0.000065 | Web API, balanced |
-| Reranked | 0.9196 | ~950ms | ~$0.000065 | **Production default** |
+| Reranked | 0.9118 | ~950ms | ~$0.000065 | **Production default** |
 | Query Expansion | 0.9071 | ~1800ms | ~$0.000195 | Broad search |
 | CoT | **0.9434** | ~2100ms | ~$0.000181 | High-stakes, hallucination-critical |
 
@@ -182,7 +182,7 @@ python run_reranker_eval.py
 |-----------|:-----------:|:---------:|:---------:|:------:|:-------:|
 | Baseline RAG | 0.8389 | 0.8405 | 0.9000 | 0.9333 | 0.8782 |
 | + Hybrid Search | 0.8833 | 0.8717 | 0.8778 | 0.9667 | 0.8999 |
-| + Reranking | 0.8389 | 0.8755 | **0.9639** | **1.0000** | **0.9196** |
+| + Reranking | 0.8056 | 0.8779 | **0.9639** | **1.0000** | 0.9118 |
 | + Query Expansion (combined) | 0.8222 | 0.8423 | **0.9639** | **1.0000** | 0.9071 |
 | + CoT Structured | **0.9000** | **0.9097** | **0.9639** | **1.0000** | **0.9434** |
 | + Adaptive Retrieval | 0.8333 | 0.8939 | **0.9639** | **1.0000** | 0.9228 |
@@ -194,10 +194,12 @@ python run_reranker_eval.py
 
 | Source | Count | Content |
 |--------|-------|---------|
-| SQUAD v1.1 | 150 QA pairs | Question + context + ground truth answer |
+| SQUAD v1.1 | 150 QA pairs | Factual QA — mostly **University of Notre Dame** domain |
 | Wikipedia | 15 articles | ML, DL, AI, NLP, Transformer, LLM, RAG, Vector DB… |
 | ArXiv abstracts | 10 papers | RAG, DPR, RAGAS, Self-RAG, HyDE, Sentence-BERT… |
-| **Total** | **56 documents** | **~750K characters of technical AI/ML content** |
+| **Total** | **56 documents** | **~750K characters** |
+
+> **Note on dataset design:** The QA evaluation pairs are from SQUAD v1.1 (*University of Notre Dame* passage) — a different domain from the AI/ML documents. The answer-containing passage for each QA pair is pre-merged into the retrieval corpus by `align_dataset.py`, guaranteeing the answer is always retrievable. This is why Context Recall reaches 1.0000 and scores are an optimistic upper bound. See [RESEARCH_REPORT.md — Limitations](RESEARCH_REPORT.md) for details.
 
 Train/test split: 70% train (105 QA pairs) / 30% test (45 QA pairs, 30 used for eval).
 
