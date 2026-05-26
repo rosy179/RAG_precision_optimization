@@ -1,0 +1,33 @@
+# config/balanced.yaml
+# Profile: Balanced — hybrid retrieval, good accuracy, moderate cost
+# Use for: web APIs, chatbots, general production workloads
+# Accuracy: ~0.90 | Latency: ~680ms | Cost: ~$0.000065/query
+
+retrieval:
+  type: hybrid                # BM25 + Semantic + RRF
+  top_k: 3
+  retrieve_depth: 10          # candidates before merging
+  chunk_size: 512
+  chunk_overlap: 50
+  embed_model: text-embedding-ada-002
+  bm25_weight: 0.5
+  semantic_weight: 0.5
+
+reranking:
+  enabled: false
+
+query_expansion:
+  enabled: false
+
+generation:
+  use_cot: false
+  model: gpt-4o-mini
+  max_tokens: 350
+  temperature: 0.0
+
+optimization:
+  cache_enabled: true
+  cache_dir: cache
+  batch_size: 5
+  timeout_seconds: 12
+  max_retries: 3

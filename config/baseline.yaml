@@ -1,0 +1,29 @@
+# config/baseline.yaml
+# Profile: Baseline — fast, minimal cost, no extra dependencies
+# Use for: demos, prototyping, budget-constrained environments
+# Accuracy: ~0.88 | Latency: ~520ms | Cost: ~$0.000057/query
+
+retrieval:
+  type: semantic              # pure vector search (ChromaDB + OpenAI embeddings)
+  top_k: 3
+  chunk_size: 512
+  chunk_overlap: 50
+  embed_model: text-embedding-ada-002
+
+reranking:
+  enabled: false
+
+query_expansion:
+  enabled: false
+
+generation:
+  use_cot: false
+  model: gpt-4o-mini
+  max_tokens: 300
+  temperature: 0.0
+
+optimization:
+  cache_enabled: false
+  batch_size: 1
+  timeout_seconds: 10
+  max_retries: 2

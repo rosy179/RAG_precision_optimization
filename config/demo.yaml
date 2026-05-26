@@ -1,0 +1,33 @@
+# config/demo.yaml
+# Profile: Demo — fastest possible, works without API key (mock responses)
+# Use for: presentations, CI testing, offline environments
+# Accuracy: ~0.88 (mock) | Latency: <100ms (mock) | Cost: $0
+
+retrieval:
+  type: semantic
+  top_k: 3
+  chunk_size: 256             # smaller chunks → faster indexing for demo
+  chunk_overlap: 25
+  embed_model: text-embedding-ada-002
+
+reranking:
+  enabled: false
+
+query_expansion:
+  enabled: false
+
+generation:
+  use_cot: false
+  model: gpt-4o-mini
+  max_tokens: 200
+  temperature: 0.0
+
+optimization:
+  cache_enabled: true         # cache responses so demo runs without repeated API calls
+  cache_dir: cache
+  batch_size: 1
+  timeout_seconds: 8
+  max_retries: 1
+
+# When OPENAI_API_KEY is not set, all pipelines fall back to mock responses automatically.
+# The mock responses demonstrate the pipeline structure without API costs.
