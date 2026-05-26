@@ -86,7 +86,10 @@ def download_wikipedia_documents(topics=None, output_file="wiki_documents.json")
         return False
     
     try:
-        wiki = wikipediaapi.Wikipedia('en')
+        wiki = wikipediaapi.Wikipedia(
+            language='en',
+            user_agent='RAG-Research-Bot/1.0 (research@example.com)'
+        )
         documents = []
         
         for topic in topics:

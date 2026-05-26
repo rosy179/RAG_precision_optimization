@@ -64,25 +64,11 @@ def collect_arxiv_fast():
 
     papers = []
 
-    # Option 1: ms_marco -- tiny, fast, QA-style (relevance overlaps with RAG)
+    # ms_marco -- tiny, fast, QA-style (relevance overlaps with RAG)
     if not papers:
         papers = try_dataset(
             name="ms_marco", config="v1.1", split="train[:500]",
             text_field="query", title_field=None
-        )
-
-    # Option 2: allenai/s2orc-doc2json abstracts (small)
-    if not papers:
-        papers = try_dataset(
-            name="allenai/s2orc-doc2json", config=None, split="train[:300]",
-            text_field="abstract", title_field="title"
-        )
-
-    # Option 3: Fraser/NLP-reading-comprehension (NLP papers)
-    if not papers:
-        papers = try_dataset(
-            name="Fraser/news-category-dataset", config=None, split="train[:500]",
-            text_field="short_description", title_field="headline"
         )
 
     if not papers:
