@@ -36,10 +36,15 @@ Thumbs.db
 tmp/
 temp/
 
+# --- Node ---
+node_modules/
+
 # --- Project generated data/artifacts ---
-data/chroma_db/
+data/chroma_db*/
 data/*.json
+data/webapp.db
 results/*.json
+backend/uploads/
 
 # --- Keep git for directory structure ---
 !data/.gitkeep
