@@ -325,7 +325,7 @@ The `RAGMonitor` logs warnings automatically when:
 Run the cost analysis tool:
 
 ```bash
-python run_cost_analysis.py
+python scripts/run_cost_analysis.py
 ```
 
 ### Quick estimates (per 1,000 queries)

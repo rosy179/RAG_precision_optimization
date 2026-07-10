@@ -10,7 +10,7 @@ wget https://your-repo/download_rag_data.py
 pip install datasets wikipedia-api arxiv
 
 # 3. Run script
-python download_rag_data.py
+python scripts/download_rag_data.py
 
 # 4. Choose option 1 (SQUAD + Wikipedia)
 # Answer: 1
@@ -182,7 +182,7 @@ If you can get internal company data:
 
 #### **Path A: Fastest (15 min) ⭐ RECOMMENDED**
 ```bash
-python download_rag_data.py
+python scripts/download_rag_data.py
 # Answer: 1
 # Wait 10 minutes
 # Done!

@@ -80,6 +80,7 @@ RAG_prescision_optimization/
 │   ├── query_expansion.py        # Day 15-17: Multi-Query + HyDE expansion
 │   ├── cot_rag.py                # Day 22-24: Chain-of-Thought generation
 │   ├── adaptive_rag.py           # Day 18-20: Adaptive top_k by query complexity
+│   ├── multihop_rag.py           # Multi-hop retrieval (iterative query decomposition)
 │   ├── multilingual_rag.py       # Bonus: Multilingual support (VI, JA, 100+ langs)
 │   ├── cost_analyzer.py          # Latency, token counting, API cost estimation
 │   ├── error_analyzer.py         # Failure mode classification (hallucination, etc.)
@@ -87,7 +88,24 @@ RAG_prescision_optimization/
 │   ├── resilience.py             # Retry + timeout + fallback wrapper
 │   └── monitoring.py             # Query logging and latency/cost monitoring
 │
-├── notebooks/                     # Jupyter notebooks (optional exploration)
+├── scripts/
+│   ├── run_reranker_eval.py       # Run + evaluate Reranker pipeline
+│   ├── run_query_expansion_eval.py # Run + evaluate Query Expansion pipeline
+│   ├── run_cot_eval.py            # Run + evaluate Chain-of-Thought pipeline
+│   ├── run_adaptive_eval.py       # Run + evaluate Adaptive Retrieval pipeline
+│   ├── run_multihop_eval.py       # Run + evaluate Multi-hop pipeline
+│   ├── run_multilingual_demo.py   # Demo multilingual RAG (Vietnamese + Japanese)
+│   ├── run_cost_analysis.py       # Latency + token + API cost analysis per technique
+│   ├── run_error_analysis.py      # Error classification and failure mode analysis
+│   ├── run_ablation_study.py      # Technique combination ablation study
+│   ├── collect_dataset.py         # Data collection: SQUAD + Wikipedia
+│   ├── collect_arxiv.py           # Data collection: ArXiv papers (with retry)
+│   ├── collect_arxiv_hf.py        # Data collection: ArXiv via HuggingFace datasets
+│   ├── download_rag_data.py       # Interactive data downloader
+│   └── align_dataset.py           # Merge SQUAD contexts into documents
+│
+├── backend/                       # FastAPI web app (auth, documents, chat)
+├── frontend/                      # React + Vite web UI
 │
 ├── results/
 │   ├── baseline_metrics.json      # Week 1 eval: avg 0.8782
@@ -103,24 +121,16 @@ RAG_prescision_optimization/
 │   ├── production.yaml            # Full stack: Hybrid + Reranker + CoT
 │   └── demo.yaml                  # Lightweight demo (no API key needed)
 │
-├── run_reranker_eval.py           # Run + evaluate Reranker pipeline
-├── run_query_expansion_eval.py    # Run + evaluate Query Expansion pipeline
-├── run_cot_eval.py                # Run + evaluate Chain-of-Thought pipeline
-├── run_adaptive_eval.py           # Run + evaluate Adaptive Retrieval pipeline
-├── run_multilingual_demo.py       # Demo multilingual RAG (Vietnamese + Japanese)
-├── run_cost_analysis.py           # Latency + token + API cost analysis per technique
-├── run_error_analysis.py          # Error classification and failure mode analysis
-├── run_ablation_study.py          # Technique combination ablation study
-├── collect_dataset.py             # Data collection: SQUAD + Wikipedia
-├── collect_arxiv.py               # Data collection: ArXiv papers (with retry)
-├── collect_arxiv_hf.py            # Data collection: ArXiv via HuggingFace datasets
-├── download_rag_data.py           # Interactive data downloader
-├── align_dataset.py               # Merge SQUAD contexts into documents
+├── docs/
+│   ├── HOW_TO_RUN.md              # Step-by-step guide for each technique
+│   ├── DEPLOYMENT.md              # Deployment guide
+│   ├── QUICK_START_DATA.md        # Data download quick start
+│   └── rag_precision_45day_plan.md # 45-day project plan
+│
+├── tests/                         # Pytest test suite
 ├── requirements.txt
 ├── .env.example                   # Copy to .env and add API keys
-├── HOW_TO_RUN.md                  # Step-by-step guide for each technique
-├── RESEARCH_REPORT.md             # Full research report (Vietnamese)
-├── PRESENTATION_SLIDES.md         # Marp presentation slides (15 slides)
+├── start.ps1                      # Start backend + frontend together
 └── README.md
 ```
 
@@ -156,10 +166,10 @@ python src/hybrid_rag.py
 python src/reranker_rag.py
 
 # Run full evaluation + comparison
-python run_reranker_eval.py
+python scripts/run_reranker_eval.py
 ```
 
-> See [HOW_TO_RUN.md](HOW_TO_RUN.md) for detailed instructions and explanations.
+> See [docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md) for detailed instructions and explanations.
 
 ---
 
@@ -199,7 +209,7 @@ python run_reranker_eval.py
 | ArXiv abstracts | 10 papers | RAG, DPR, RAGAS, Self-RAG, HyDE, Sentence-BERT… |
 | **Total** | **56 documents** | **~750K characters** |
 
-> **Note on dataset design:** The QA evaluation pairs are from SQUAD v1.1 (*University of Notre Dame* passage) — a different domain from the AI/ML documents. The answer-containing passage for each QA pair is pre-merged into the retrieval corpus by `align_dataset.py`, guaranteeing the answer is always retrievable. This is why Context Recall reaches 1.0000 and scores are an optimistic upper bound. See [RESEARCH_REPORT.md — Limitations](RESEARCH_REPORT.md) for details.
+> **Note on dataset design:** The QA evaluation pairs are from SQUAD v1.1 (*University of Notre Dame* passage) — a different domain from the AI/ML documents. The answer-containing passage for each QA pair is pre-merged into the retrieval corpus by `scripts/align_dataset.py`, guaranteeing the answer is always retrievable. This is why Context Recall reaches 1.0000 and scores are an optimistic upper bound.
 
 Train/test split: 70% train (105 QA pairs) / 30% test (45 QA pairs, 30 used for eval).
 
@@ -220,16 +230,16 @@ Train/test split: 70% train (105 QA pairs) / 30% test (45 QA pairs, 30 used for 
 
 ```bash
 # Cost & latency analysis (estimate mode — no API calls needed)
-python run_cost_analysis.py
+python scripts/run_cost_analysis.py
 
 # Live measurement (API key required)
-python run_cost_analysis.py --live --n 10
+python scripts/run_cost_analysis.py --live --n 10
 
 # Error classification: hallucination, low relevance, incomplete
-python run_error_analysis.py
+python scripts/run_error_analysis.py
 
 # Ablation study: find optimal technique combination
-python run_ablation_study.py
+python scripts/run_ablation_study.py
 ```
 
 ---

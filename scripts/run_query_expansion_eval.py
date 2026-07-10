@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-run_cot_eval.py
-----------------
-Day 22-24: Evaluate the Chain-of-Thought RAG pipeline.
-Runs 30 SQUAD test samples and compares against all previous techniques.
+run_query_expansion_eval.py
+----------------------------
+Day 15-17: Evaluate the Query Expansion pipeline (Multi-Query + HyDE).
+Runs 30 SQUAD test samples in "combined" mode and compares
+against baseline, hybrid, and reranked results.
 
 Usage:
-    python run_cot_eval.py                    # structured mode (default)
-    python run_cot_eval.py --mode simple
-    python run_cot_eval.py --mode citation
-    python run_cot_eval.py --mode structured
+    python run_query_expansion_eval.py
+    python run_query_expansion_eval.py --mode multi_query
+    python run_query_expansion_eval.py --mode hyde
+    python run_query_expansion_eval.py --mode combined   (default)
 """
 
 import sys
@@ -18,9 +19,9 @@ import argparse
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cot_rag import ChainOfThoughtRAG
+from query_expansion import QueryExpansionRAG
 from evaluation import (
     build_eval_dataset,
     run_ragas_evaluation,
@@ -30,14 +31,14 @@ from evaluation import (
 )
 
 
-def main(mode: str = "structured"):
+def main(mode: str = "combined"):
     print("=" * 65)
-    print(f"  Chain-of-Thought RAG Evaluation -- Day 22-24  (mode={mode})")
+    print(f"  Query Expansion RAG Evaluation -- Day 15-17  (mode={mode})")
     print("=" * 65)
 
     # 1. Build pipeline
-    print("\n[STEP 1] Initializing ChainOfThoughtRAG pipeline...")
-    rag = ChainOfThoughtRAG(mode=mode)
+    print("\n[STEP 1] Initializing QueryExpansionRAG pipeline...")
+    rag = QueryExpansionRAG(mode=mode, n_queries=3)
     rag.build()
 
     # 2. Build evaluation dataset
@@ -50,7 +51,7 @@ def main(mode: str = "structured"):
 
     # 3. Ragas evaluation
     print("\n[STEP 3] Running Ragas evaluation...")
-    run_name = f"cot_{mode}"
+    run_name = f"query_expansion_{mode}"
     metrics = run_ragas_evaluation(eval_data, run_name=run_name)
 
     # 4. Save and display
@@ -66,9 +67,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["structured", "simple", "citation"],
-        default="structured",
-        help="CoT generation mode (default: structured)",
+        choices=["multi_query", "hyde", "combined"],
+        default="combined",
+        help="Query expansion mode (default: combined)",
     )
     args = parser.parse_args()
     main(mode=args.mode)

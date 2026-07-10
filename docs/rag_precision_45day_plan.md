@@ -8,7 +8,7 @@
 **Target:** 85-90% success rate  
 **Deliverables:** Working code + Evaluation report + Best practices
 
-> **📌 Ghi chú cập nhật (2026-05-24):** Các chỉ số baseline và mục tiêu trong kế hoạch ban đầu là ước tính trước khi đo thực tế. Baseline thực tế đạt **0.8782 avg** (cao hơn dự kiến do context SQUAD được merge trực tiếp vào corpus — xem mục Limitations trong RESEARCH_REPORT.md). Kết quả cuối cùng: **0.9434 avg** (CoT structured), vượt mục tiêu 85-90%.
+> **📌 Ghi chú cập nhật (2026-05-24):** Các chỉ số baseline và mục tiêu trong kế hoạch ban đầu là ước tính trước khi đo thực tế. Baseline thực tế đạt **0.8782 avg** (cao hơn dự kiến do context SQUAD được merge trực tiếp vào corpus). Kết quả cuối cùng: **0.9434 avg** (CoT structured), vượt mục tiêu 85-90%.
 
 ---
 

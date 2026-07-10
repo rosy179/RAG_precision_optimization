@@ -108,7 +108,7 @@ python src/evaluation.py
 ## Kỹ thuật 3: Reranking — CrossEncoder (Day 11-13)
 
 **File:** `src/reranker_rag.py`  
-**Runner:** `run_reranker_eval.py`
+**Runner:** `scripts/run_reranker_eval.py`
 
 **Giải thích:**
 Thêm một tầng "giám khảo" thứ hai sau khi hybrid search trả về 20 candidates.
@@ -139,7 +139,7 @@ python src/reranker_rag.py
 
 **Chạy evaluation đầy đủ + so sánh 3 kỹ thuật:**
 ```bash
-python run_reranker_eval.py
+python scripts/run_reranker_eval.py
 # Output: results/reranked_metrics.json
 #         In bảng so sánh baseline / hybrid / reranked
 ```
@@ -170,7 +170,7 @@ RETRIEVE_DEPTH=20    # Số candidates trước khi rerank (nên 5-10x TOP_K)
 ## So sánh toàn bộ (tính đến hiện tại)
 
 ```bash
-python run_cot_eval.py   # chạy CoT và in bảng đầy đủ
+python scripts/run_cot_eval.py   # chạy CoT và in bảng đầy đủ
 ```
 
 Kết quả thực đo (Ragas, 30 SQUAD test samples):
@@ -200,7 +200,7 @@ Kết quả thực đo (Ragas, 30 SQUAD test samples):
 ## Kỹ thuật 4: Query Expansion — Multi-Query + HyDE (Day 15-17)
 
 **File:** `src/query_expansion.py`
-**Runner:** `run_query_expansion_eval.py`
+**Runner:** `scripts/run_query_expansion_eval.py`
 
 **Giải thích:**
 
@@ -250,9 +250,9 @@ python src/query_expansion.py
 
 **Chạy evaluation + so sánh:**
 ```bash
-python run_query_expansion_eval.py                  # combined (default)
-python run_query_expansion_eval.py --mode multi_query
-python run_query_expansion_eval.py --mode hyde
+python scripts/run_query_expansion_eval.py                  # combined (default)
+python scripts/run_query_expansion_eval.py --mode multi_query
+python scripts/run_query_expansion_eval.py --mode hyde
 ```
 
 **Kết quả đạt được (combined mode):**
@@ -295,7 +295,7 @@ RETRIEVE_DEPTH=20    # Candidates mỗi query variant
 ## Kỹ thuật 5: Chain-of-Thought (CoT) Retrieval — Day 22-24
 
 **File:** `src/cot_rag.py`
-**Runner:** `run_cot_eval.py`
+**Runner:** `scripts/run_cot_eval.py`
 
 **Giải thích:**
 Giữ nguyên retrieval stack tốt nhất (Hybrid + CrossEncoder), chỉ thay đổi **bước generation**.
@@ -334,9 +334,9 @@ python src/cot_rag.py
 
 **Chạy evaluation + so sánh tất cả kỹ thuật:**
 ```bash
-python run_cot_eval.py                    # structured (default)
-python run_cot_eval.py --mode simple
-python run_cot_eval.py --mode citation
+python scripts/run_cot_eval.py                    # structured (default)
+python scripts/run_cot_eval.py --mode simple
+python scripts/run_cot_eval.py --mode citation
 ```
 
 **Kết quả đạt được:**
@@ -365,7 +365,7 @@ python run_cot_eval.py --mode citation
 ## Kỹ thuật 6: Multilingual RAG — Vietnamese, Japanese & 100+ ngôn ngữ
 
 **File:** `src/multilingual_rag.py`
-**Runner:** `run_multilingual_demo.py`
+**Runner:** `scripts/run_multilingual_demo.py`
 
 **Vấn đề với input không phải tiếng Anh:**
 
@@ -402,19 +402,19 @@ Input (VI/JA) → multilingual-e5-small embed (100+ ngôn ngữ)
 **Chạy demo:**
 ```bash
 # Cả 2 strategy + cả 2 ngôn ngữ (3 câu hỏi mỗi ngôn ngữ)
-python run_multilingual_demo.py
+python scripts/run_multilingual_demo.py
 
 # Chỉ translate strategy, tiếng Việt
-python run_multilingual_demo.py --strategy translate --lang vi --n 3
+python scripts/run_multilingual_demo.py --strategy translate --lang vi --n 3
 
 # Chỉ multilingual strategy, tiếng Nhật
-python run_multilingual_demo.py --strategy multilingual --lang ja --n 3
+python scripts/run_multilingual_demo.py --strategy multilingual --lang ja --n 3
 
 # So sánh 2 strategy side-by-side
-python run_multilingual_demo.py --strategy compare --lang vi
+python scripts/run_multilingual_demo.py --strategy compare --lang vi
 
 # Xem bảng phân tích kỹ thuật
-python run_multilingual_demo.py --analysis
+python scripts/run_multilingual_demo.py --analysis
 ```
 
 **Kết quả thực tế (demo output):**
@@ -449,14 +449,14 @@ Ngày 7:   Đo Ragas metrics với multilingual test set
 | Test reranker pipeline | `python src/reranker_rag.py` |
 | Test query expansion pipeline | `python src/query_expansion.py` |
 | Test CoT pipeline | `python src/cot_rag.py` |
-| Evaluate reranker + so sánh | `python run_reranker_eval.py` |
-| Evaluate query expansion (combined) | `python run_query_expansion_eval.py` |
-| Evaluate query expansion (mode cụ thể) | `python run_query_expansion_eval.py --mode multi_query` |
-| Evaluate CoT (structured) | `python run_cot_eval.py` |
-| Evaluate CoT (mode cụ thể) | `python run_cot_eval.py --mode simple` |
+| Evaluate reranker + so sánh | `python scripts/run_reranker_eval.py` |
+| Evaluate query expansion (combined) | `python scripts/run_query_expansion_eval.py` |
+| Evaluate query expansion (mode cụ thể) | `python scripts/run_query_expansion_eval.py --mode multi_query` |
+| Evaluate CoT (structured) | `python scripts/run_cot_eval.py` |
+| Evaluate CoT (mode cụ thể) | `python scripts/run_cot_eval.py --mode simple` |
 | Evaluate tất cả cùng lúc | `python src/evaluation.py` |
-| Demo multilingual (VI + JA) | `python run_multilingual_demo.py` |
-| Demo multilingual (strategy so sánh) | `python run_multilingual_demo.py --strategy compare --lang vi` |
+| Demo multilingual (VI + JA) | `python scripts/run_multilingual_demo.py` |
+| Demo multilingual (strategy so sánh) | `python scripts/run_multilingual_demo.py --strategy compare --lang vi` |
 
 ---
 
