@@ -15,7 +15,8 @@
     "react-dom": "^18.3.1",
     "react-dropzone": "^14.2.3",
     "react-markdown": "^9.0.1",
-    "react-router-dom": "^6.24.0"
+    "react-router-dom": "^6.24.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.13",

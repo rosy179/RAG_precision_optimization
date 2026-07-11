@@ -6,68 +6,58 @@ import openai
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from backend.database import get_db, Document, User
+from backend.database import get_db, ChatSession, Document, User
 from backend.api.auth import get_current_user
 from backend.services import document_processor as dp
 from backend.services.user_rag import get_service, openai_error_detail
 
 router = APIRouter()
 
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
-ALLOWED_EXTENSIONS = {".pdf", ".txt", ".png", ".jpg", ".jpeg", ".webp"} | AUDIO_EXTENSIONS
-
 
 @router.post("/upload")
 async def upload_file(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
+    session_id: str = Form(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Documents are scoped to the conversation they were uploaded in.
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id, ChatSession.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(404, "Session not found")
+
     rag = get_service(current_user.id)
 
     if file:
         filename = file.filename or "upload"
         ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if ext not in ALLOWED_EXTENSIONS:
+        if ext not in dp.ALLOWED_EXTENSIONS:
             raise HTTPException(400, f"Unsupported file type: {ext}")
 
-        content_type = file.content_type or ""
         file_bytes = await file.read()
-
-        if ext == ".pdf" or "pdf" in content_type:
-            chunks, summary = dp.process_pdf(file_bytes, filename)
-            doc_type = "pdf"
-        elif ext in AUDIO_EXTENSIONS or content_type.startswith("audio/"):
-            try:
-                chunks, summary = dp.process_audio(file_bytes, filename)
-            except openai.APIError as e:
-                raise HTTPException(502, openai_error_detail(e)) from e
-            doc_type = "audio"
-        elif ext in {".png", ".jpg", ".jpeg", ".webp"} or content_type.startswith("image/"):
-            chunks, summary = dp.process_image(file_bytes, filename)
-            doc_type = "image"
-        elif ext == ".txt":
-            text = file_bytes.decode("utf-8", errors="replace")
-            from backend.services.document_processor import _make_doc_id, _sliding_window_chunks, _clean_text, _generate_summary
-            doc_id = _make_doc_id(filename)
-            chunks = _sliding_window_chunks(_clean_text(text), doc_id, filename, "txt")
-            summary = _generate_summary(text[:4000], filename)
-            doc_type = "txt"
-        else:
-            raise HTTPException(400, "Cannot process this file format")
+        try:
+            chunks, summary, doc_type = dp.process_file(file_bytes, filename, file.content_type or "")
+        except openai.APIError as e:
+            raise HTTPException(502, openai_error_detail(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
         if not chunks:
             raise HTTPException(422, "Could not extract text from the file")
 
         doc_id = chunks[0]["doc_id"]
         try:
-            chunk_count = rag.add_document(chunks, summary, {"id": doc_id, "name": filename, "type": doc_type})
+            chunk_count = rag.add_document(chunks, summary, {
+                "id": doc_id, "name": filename, "type": doc_type, "session_id": session_id,
+            })
         except openai.APIError as e:
             raise HTTPException(502, openai_error_detail(e)) from e
 
-        doc = Document(id=doc_id, user_id=current_user.id, name=filename,
-                       doc_type=doc_type, chunk_count=chunk_count)
+        doc = Document(id=doc_id, user_id=current_user.id, session_id=session_id,
+                       name=filename, doc_type=doc_type, chunk_count=chunk_count)
         db.add(doc)
         db.commit()
 
@@ -85,12 +75,14 @@ async def upload_file(
         doc_id = chunks[0]["doc_id"]
         title  = chunks[0].get("title", url)
         try:
-            chunk_count = rag.add_document(chunks, summary, {"id": doc_id, "name": title, "type": "url"})
+            chunk_count = rag.add_document(chunks, summary, {
+                "id": doc_id, "name": title, "type": "url", "session_id": session_id,
+            })
         except openai.APIError as e:
             raise HTTPException(502, openai_error_detail(e)) from e
 
-        doc = Document(id=doc_id, user_id=current_user.id, name=title,
-                       doc_type="url", chunk_count=chunk_count)
+        doc = Document(id=doc_id, user_id=current_user.id, session_id=session_id,
+                       name=title, doc_type="url", chunk_count=chunk_count)
         db.add(doc)
         db.commit()
 

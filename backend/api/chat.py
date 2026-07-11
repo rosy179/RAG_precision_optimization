@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from backend.database import get_db, ChatSession, Message, User
+from backend.database import get_db, ChatSession, Document, Message, User
 from backend.api.auth import get_current_user
 from backend.services.user_rag import get_service, openai_error_detail
 
@@ -16,6 +16,9 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     question: str
     history: list[dict] = []
+    # Names of documents attached in the input bar for this message,
+    # echoed back so the UI can render them inside the user bubble.
+    attachments: list[str] = []
 
 
 @router.post("/sessions")
@@ -57,11 +60,12 @@ def get_messages(
         raise HTTPException(404, "Session not found")
     return [
         {
-            "id":         m.id,
-            "role":       m.role,
-            "content":    m.content,
-            "sources":    json.loads(m.sources_json or "[]"),
-            "created_at": m.created_at.isoformat(),
+            "id":          m.id,
+            "role":        m.role,
+            "content":     m.content,
+            "sources":     json.loads(m.sources_json or "[]"),
+            "attachments": json.loads(m.attachments_json or "[]"),
+            "created_at":  m.created_at.isoformat(),
         }
         for m in session.messages
     ]
@@ -82,12 +86,17 @@ def chat(
 
     rag = get_service(current_user.id)
     try:
-        result = rag.query(req.question, req.history)
+        result = rag.query(req.question, req.history, session_id=session_id)
     except openai.APIError as e:
         raise HTTPException(502, openai_error_detail(e)) from e
 
     # Save user message
-    user_msg = Message(session_id=session_id, role="user", content=req.question)
+    user_msg = Message(
+        session_id=session_id,
+        role="user",
+        content=req.question,
+        attachments_json=json.dumps(req.attachments, ensure_ascii=False),
+    )
     db.add(user_msg)
 
     # Save assistant message
@@ -126,6 +135,18 @@ def delete_session(
     ).first()
     if not session:
         raise HTTPException(404, "Session not found")
+
+    # Documents are session-scoped: remove this session's docs from the
+    # vector store and registry too, so they don't linger as orphans.
+    docs = db.query(Document).filter(
+        Document.session_id == session_id, Document.user_id == current_user.id
+    ).all()
+    if docs:
+        rag = get_service(current_user.id)
+        for doc in docs:
+            rag.remove_document(doc.id)
+            db.delete(doc)
+
     db.delete(session)
     db.commit()
     return {"success": True}

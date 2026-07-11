@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import (
-    create_engine, Column, String, Text, DateTime, ForeignKey, Integer
+    create_engine, Column, String, Text, DateTime, ForeignKey, Integer, text
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, relationship
 
@@ -46,6 +46,8 @@ class Message(Base):
     role         = Column(String, nullable=False)  # "user" | "assistant"
     content      = Column(Text, nullable=False)
     sources_json = Column(Text, default="[]")
+    # Names of documents the user attached alongside this message (user role only).
+    attachments_json = Column(Text, default="[]")
     created_at   = Column(DateTime, default=datetime.utcnow)
     session      = relationship("ChatSession", back_populates="messages")
 
@@ -54,6 +56,9 @@ class Document(Base):
     __tablename__ = "documents"
     id          = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id     = Column(String, ForeignKey("users.id"), nullable=False)
+    # Documents are scoped to the conversation they were uploaded in;
+    # NULL only for legacy rows created before session scoping.
+    session_id  = Column(String, ForeignKey("chat_sessions.id"), nullable=True)
     name        = Column(String, nullable=False)
     doc_type    = Column(String, nullable=False)  # "pdf" | "url" | "image"
     chunk_count = Column(Integer, default=0)
@@ -63,6 +68,16 @@ class Document(Base):
 
 def create_tables():
     Base.metadata.create_all(bind=engine)
+    # Lightweight migration: create_all never alters existing tables.
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(documents)"))]
+        if "session_id" not in cols:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN session_id VARCHAR"))
+            conn.commit()
+        msg_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(messages)"))]
+        if "attachments_json" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN attachments_json TEXT DEFAULT '[]'"))
+            conn.commit()
 
 
 def get_db():

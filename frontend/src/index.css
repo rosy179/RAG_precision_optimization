@@ -4,33 +4,125 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens ──────────────────────────────────────── */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-blur: blur(20px);
+  --glass-shadow: 0 8px 32px rgba(124, 58, 237, 0.12);
+
+  --purple: #7C3AED;
+  --blue:   #3B82F6;
+  --bg-from: #EDE9FF;
+  --bg-to:   #DFF0FF;
+}
+
 @layer base {
   *, *::before, *::after { box-sizing: border-box; }
   html, body, #root { height: 100%; margin: 0; }
   body {
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
-    background: #F0EEFF;
+    background: linear-gradient(135deg, #EDE9FF 0%, #E0EEFF 50%, #D9F0FF 100%);
     overflow: hidden;
   }
   #root { display: flex; }
 }
 
+/* ─── Glass utility ──────────────────────────────────────── */
 @layer components {
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+  }
+
+  .glass-dark {
+    background: rgba(124, 58, 237, 0.08);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(124, 58, 237, 0.18);
+  }
+
   .btn-primary {
     @apply bg-[#7C3AED] hover:bg-[#6D28D9] text-white font-medium px-4 py-2 rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+    box-shadow: 0 4px 15px rgba(124, 58, 237, 0.4);
   }
   .input-base {
-    @apply w-full border border-[#E0D9FF] rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-[#7C3AED]/30 focus:border-[#7C3AED] bg-white transition-all;
+    @apply w-full border rounded-xl px-4 py-2.5 text-sm outline-none transition-all;
+    background: rgba(255,255,255,0.7);
+    border-color: rgba(124, 58, 237, 0.2);
+    backdrop-filter: blur(8px);
+  }
+  .input-base:focus {
+    border-color: #7C3AED;
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15);
+    background: rgba(255,255,255,0.9);
+  }
+
+  .session-card {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-2xl cursor-pointer transition-all duration-200;
+    background: transparent;
+  }
+  .session-card:hover {
+    background: rgba(124, 58, 237, 0.08);
+    box-shadow: 0 2px 12px rgba(124, 58, 237, 0.1);
+  }
+  .session-card.active {
+    background: rgba(124, 58, 237, 0.12);
+    border: 1px solid rgba(124, 58, 237, 0.25);
   }
 }
 
-/* Scrollbar */
+/* ─── Scrollbar ──────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #C4B5FD; border-radius: 99px; }
+::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.3); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: #7C3AED; }
 
-/* Typing animation */
+/* ─── Typing animation ───────────────────────────────────── */
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 .typing-cursor::after { content: '▋'; animation: blink 1s infinite; margin-left: 2px; }
+
+/* ─── AI Robot animations ────────────────────────────────── */
+@keyframes robot-breathe {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.03); }
+}
+
+@keyframes robot-float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-7px); }
+}
+
+@keyframes aura-sway {
+  0%, 100% { transform: rotate(-5deg); }
+  50%       { transform: rotate(5deg); }
+}
+
+@keyframes aura-breathe {
+  0%, 100% { opacity: 0.85; transform: scale(0.95); }
+  50%       { opacity: 1;   transform: scale(1.12); }
+}
+
+@keyframes eye-blink {
+  0%, 88%, 96%, 100% { transform: scaleY(1); }
+  92%                { transform: scaleY(0.06); }
+}
+
+@keyframes reflection-pulse {
+  0%, 100% { opacity: 0.55; transform: scaleX(1); }
+  50%       { opacity: 0.85; transform: scaleX(1.04); }
+}
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.6; }
+  40%           { transform: translateY(-6px); opacity: 1; }
+}
+
+/* ─── Shortcut card hover ────────────────────────────────── */
+@keyframes card-lift {
+  to { transform: translateY(-2px); }
+}

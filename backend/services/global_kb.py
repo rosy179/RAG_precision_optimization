@@ -1,0 +1,241 @@
+"""
+Global shared knowledge base.
+
+One ChromaDB collection pair shared by ALL users and sessions, next to the
+per-user session-scoped collections in user_rag.py. Filled via the
+/api/knowledge endpoints or scripts/ingest_knowledge.py; every chat query
+merges retrieval from the session's own documents and this KB.
+"""
+
+import os
+import re
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import chromadb
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction, SentenceTransformerEmbeddingFunction
+from rank_bm25 import BM25Okapi
+
+from dotenv import load_dotenv
+load_dotenv()
+
+DB_PATH     = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
+
+_kb: Optional["GlobalKBService"] = None
+_kb_lock = threading.Lock()
+
+
+def get_kb() -> "GlobalKBService":
+    global _kb
+    if _kb is None:
+        with _kb_lock:
+            if _kb is None:
+                _kb = GlobalKBService()
+    return _kb
+
+
+def _tokenize(text: str) -> list:
+    return re.findall(r'\w+', text.lower())
+
+
+class GlobalKBService:
+    """Shared knowledge base with the same retrieval surface as a user's
+    session documents: semantic search over chunks, cached BM25, and a
+    summary collection for hierarchical doc routing.
+
+    Unlike user documents there is no SQL row per document — the registry
+    lives entirely in Chroma metadata and is restored on startup, so no
+    schema migration is needed.
+    """
+
+    def __init__(self):
+        DB_PATH.mkdir(parents=True, exist_ok=True)
+        self._chroma = chromadb.PersistentClient(path=str(DB_PATH))
+
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        if api_key and not api_key.startswith("sk-your"):
+            embed_fn = OpenAIEmbeddingFunction(api_key=api_key, model_name=EMBED_MODEL)
+        else:
+            embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+
+        self._chunk_col = self._chroma.get_or_create_collection(
+            "global_kb_chunks",
+            embedding_function=embed_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._summary_col = self._chroma.get_or_create_collection(
+            "global_kb_summaries",
+            embedding_function=embed_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        self._write_lock = threading.Lock()
+        self._chunks_store: list[dict] = []
+        self._doc_registry: list[dict] = []
+        # Index and pool are kept as one tuple so a search never scores
+        # against a pool the index wasn't built from. Unlike the per-session
+        # BM25 (tiny, rebuilt per query), the KB corpus can be large, so the
+        # index is rebuilt only on ingestion.
+        self._bm25_state: tuple[Optional[BM25Okapi], list[dict]] = (None, [])
+
+        self._restore_from_chroma()
+        print(f"[KB] Global knowledge base ready: "
+              f"{len(self._doc_registry)} docs, {len(self._chunks_store)} chunks.")
+
+    # ── Ingestion ──────────────────────────────────────────
+
+    def add_document(self, chunks: list[dict], doc_summary: str, doc_meta: dict) -> int:
+        if not chunks:
+            return 0
+        doc_id = doc_meta["id"]
+        created_at = datetime.utcnow().isoformat()
+
+        with self._write_lock:
+            self._chunk_col.upsert(
+                ids=[c["id"] for c in chunks],
+                documents=[c["text"] for c in chunks],
+                metadatas=[{
+                    "doc_id": doc_id,
+                    "title":  doc_meta["name"],
+                    "source": doc_meta.get("type", "unknown"),
+                    "chunk_index": i,
+                } for i, c in enumerate(chunks)],
+            )
+            self._summary_col.upsert(
+                ids=[doc_id],
+                documents=[doc_summary],
+                metadatas=[{"name": doc_meta["name"], "type": doc_meta.get("type", "unknown"),
+                            "created_at": created_at}],
+            )
+            # Replace lists instead of mutating so in-flight searches keep
+            # a consistent snapshot.
+            self._chunks_store = self._chunks_store + [
+                {"id": c["id"], "text": c["text"], "title": doc_meta["name"],
+                 "doc_id": doc_id, "tokens": _tokenize(c["text"])}
+                for c in chunks
+            ]
+            self._doc_registry = self._doc_registry + [{
+                "id": doc_id,
+                "name": doc_meta["name"],
+                "type": doc_meta.get("type", "unknown"),
+                "chunk_count": len(chunks),
+                "created_at": created_at,
+            }]
+            self._rebuild_bm25()
+        return len(chunks)
+
+    def remove_document(self, doc_id: str):
+        with self._write_lock:
+            existing = self._chunk_col.get(where={"doc_id": doc_id})
+            if existing["ids"]:
+                self._chunk_col.delete(ids=existing["ids"])
+            try:
+                self._summary_col.delete(ids=[doc_id])
+            except Exception:
+                pass
+            self._chunks_store = [c for c in self._chunks_store if c.get("doc_id") != doc_id]
+            self._doc_registry = [d for d in self._doc_registry if d["id"] != doc_id]
+            self._rebuild_bm25()
+
+    def get_documents(self) -> list[dict]:
+        return self._doc_registry
+
+    def chunk_count(self) -> int:
+        return len(self._chunks_store)
+
+    def is_empty(self) -> bool:
+        return not self._chunks_store
+
+    # ── Search (consumed by UserRAGService.query) ──────────
+
+    def search_summaries(self, query: str, top_k: int = 5) -> list[str]:
+        """Doc ids of the KB documents most relevant to the query."""
+        n = min(top_k, len(self._doc_registry))
+        if n == 0:
+            return []
+        res = self._summary_col.query(query_texts=[query], n_results=n)
+        return res["ids"][0] if res["ids"] else []
+
+    def search_semantic(self, query: str, n_results: int = 20,
+                        doc_ids: Optional[list[str]] = None) -> list[dict]:
+        n = min(n_results, len(self._chunks_store))
+        if n == 0:
+            return []
+        kwargs = {"query_texts": [query], "n_results": n}
+        if doc_ids:
+            kwargs["where"] = {"doc_id": {"$in": doc_ids}}
+        res = self._chunk_col.query(**kwargs)
+        out = []
+        if res["ids"] and res["ids"][0]:
+            for i, cid in enumerate(res["ids"][0]):
+                meta = res["metadatas"][0][i] if res["metadatas"] else {}
+                dist = res["distances"][0][i] if res["distances"] else 1.0
+                out.append({
+                    "id":     cid,
+                    "text":   res["documents"][0][i],
+                    "title":  meta.get("title", ""),
+                    "source": meta.get("source", ""),
+                    "doc_id": meta.get("doc_id", ""),
+                    "scope":  "global",
+                    "score":  round(1.0 - float(dist), 4),
+                })
+        return out
+
+    def search_bm25(self, query: str, n: int = 20) -> list[dict]:
+        bm25, pool = self._bm25_state
+        if bm25 is None:
+            return []
+        scores = bm25.get_scores(_tokenize(query))
+        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:n]
+        return [{"id": pool[idx]["id"], "text": pool[idx]["text"],
+                 "title": pool[idx]["title"], "doc_id": pool[idx]["doc_id"],
+                 "scope": "global", "score": round(float(score), 4)}
+                for idx, score in ranked if score > 0]
+
+    # ── Internals ──────────────────────────────────────────
+
+    def _rebuild_bm25(self):
+        pool = self._chunks_store
+        if pool:
+            self._bm25_state = (BM25Okapi([c["tokens"] for c in pool]), pool)
+        else:
+            self._bm25_state = (None, [])
+
+    def _restore_from_chroma(self):
+        """Rebuild in-memory state from persisted ChromaDB on startup."""
+        try:
+            all_chunks = self._chunk_col.get(include=["documents", "metadatas"])
+            if not all_chunks["ids"]:
+                return
+            store: list[dict] = []
+            by_doc: dict[str, dict] = {}
+            for i, cid in enumerate(all_chunks["ids"]):
+                meta = all_chunks["metadatas"][i] if all_chunks["metadatas"] else {}
+                text = all_chunks["documents"][i] if all_chunks["documents"] else ""
+                doc_id = meta.get("doc_id", "unknown")
+                store.append({"id": cid, "text": text, "title": meta.get("title", ""),
+                              "doc_id": doc_id, "tokens": _tokenize(text)})
+                info = by_doc.setdefault(doc_id, {"name": meta.get("title", ""),
+                                                  "type": meta.get("source", ""), "count": 0})
+                info["count"] += 1
+
+            created: dict[str, str] = {}
+            try:
+                summaries = self._summary_col.get(include=["metadatas"])
+                for i, sid in enumerate(summaries["ids"]):
+                    meta = summaries["metadatas"][i] if summaries["metadatas"] else {}
+                    created[sid] = meta.get("created_at", "")
+            except Exception:
+                pass
+
+            self._chunks_store = store
+            self._doc_registry = [{
+                "id": doc_id, "name": info["name"], "type": info["type"],
+                "chunk_count": info["count"], "created_at": created.get(doc_id, ""),
+            } for doc_id, info in by_doc.items()]
+            self._rebuild_bm25()
+        except Exception as e:
+            print(f"[KB] Restore warning: {e}")

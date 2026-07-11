@@ -36,21 +36,23 @@ export const sessionsAPI = {
   create: () => api.post("/api/sessions").then((r) => r.data),
   delete: (id: string) => api.delete(`/api/sessions/${id}`).then((r) => r.data),
   messages: (id: string) => api.get(`/api/sessions/${id}/messages`).then((r) => r.data),
-  chat: (id: string, question: string, history: object[]) =>
-    api.post(`/api/sessions/${id}/chat`, { question, history }).then((r) => r.data),
+  chat: (id: string, question: string, history: object[], attachments: string[] = []) =>
+    api.post(`/api/sessions/${id}/chat`, { question, history, attachments }).then((r) => r.data),
 };
 
 // ── Documents ─────────────────────────────────────────────
 export const documentsAPI = {
   list: () => api.get("/api/documents").then((r) => r.data),
-  uploadFile: (file: File) => {
+  uploadFile: (file: File, sessionId: string) => {
     const fd = new FormData();
     fd.append("file", file);
+    fd.append("session_id", sessionId);
     return api.post("/api/documents/upload", fd).then((r) => r.data);
   },
-  uploadUrl: (url: string) => {
+  uploadUrl: (url: string, sessionId: string) => {
     const fd = new FormData();
     fd.append("url", url);
+    fd.append("session_id", sessionId);
     return api.post("/api/documents/upload", fd).then((r) => r.data);
   },
   delete: (id: string) => api.delete(`/api/documents/${id}`).then((r) => r.data),

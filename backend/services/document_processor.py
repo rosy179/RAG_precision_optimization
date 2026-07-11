@@ -24,6 +24,10 @@ load_dotenv()
 CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", 512))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
 
+AUDIO_EXTENSIONS   = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
+IMAGE_EXTENSIONS   = {".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_EXTENSIONS = {".pdf", ".txt"} | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS
+
 
 def _make_doc_id(name: str) -> str:
     # Must be unique per upload (not just per name) — two users, or the same
@@ -83,18 +87,57 @@ def process_pdf(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
 
 def process_url(url: str) -> tuple[list[dict], str]:
     import requests
-    from bs4 import BeautifulSoup
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; RAG-bot/1.0)"}
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+        "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+    }
     resp = requests.get(url, timeout=20, headers=headers)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
-        tag.decompose()
-    # Try to get main content first
-    main = soup.find("main") or soup.find("article") or soup.body
-    text = main.get_text(separator="\n", strip=True) if main else soup.get_text(separator="\n", strip=True)
+    html = resp.text
+
+    text, title = "", ""
+
+    # Primary: trafilatura locates the actual article body. Naive
+    # first-<main>/<article> selection grabs cookie banners and promo
+    # widgets on real-world pages (that's how we indexed 2 KB of cookie
+    # consent text instead of a 36 KB article).
+    try:
+        import trafilatura
+        text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+        meta = trafilatura.extract_metadata(html)
+        if meta and meta.title:
+            title = meta.title
+    except Exception:
+        pass
+
+    # Fallback: BeautifulSoup with junk stripping, picking the candidate
+    # with the MOST text instead of the first one in document order.
+    if len(text) < 200:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        if not title and soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside",
+                         "noscript", "form", "iframe", "svg", "button"]):
+            tag.decompose()
+        junk = re.compile(r"cookie|consent|banner|popup|modal|menu|sidebar|share|"
+                          r"social|subscribe|newsletter|advert|promo|breadcrumb", re.I)
+        for attr in ("class", "id"):
+            for tag in soup.find_all(attrs={attr: junk}):
+                tag.decompose()
+        candidates = soup.find_all(["main", "article"]) or ([soup.body] if soup.body else [])
+        best = max(candidates, key=lambda t: len(t.get_text()), default=None)
+        text = (best or soup).get_text(separator="\n", strip=True)
+
+    if not title:
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        title = _clean_text(m.group(1)) if m else url
+
     text = _clean_text(text)
-    title = soup.title.string.strip() if soup.title else url
+    if len(text) < 100:
+        raise ValueError("Trang không có nội dung văn bản đọc được (có thể nội dung được render bằng JavaScript)")
+
     doc_id = _make_doc_id(url)
     chunks = _sliding_window_chunks(text, doc_id, title, "url")
     summary = _generate_summary(text[:4000], title)
@@ -149,6 +192,37 @@ def process_audio(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     chunks = _sliding_window_chunks(transcript, doc_id, filename, "audio")
     summary = _generate_summary(transcript[:4000], filename)
     return chunks, summary
+
+
+def process_txt(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+    text = _clean_text(file_bytes.decode("utf-8", errors="replace"))
+    doc_id = _make_doc_id(filename)
+    chunks = _sliding_window_chunks(text, doc_id, filename, "txt")
+    summary = _generate_summary(text[:4000], filename)
+    return chunks, summary
+
+
+def process_file(file_bytes: bytes, filename: str,
+                 content_type: str = "") -> tuple[list[dict], str, str]:
+    """Dispatch to the right handler by extension/MIME.
+
+    Returns (chunks, summary, doc_type). Raises ValueError for
+    unsupported formats.
+    """
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == ".pdf" or "pdf" in content_type:
+        chunks, summary = process_pdf(file_bytes, filename)
+        return chunks, summary, "pdf"
+    if ext in AUDIO_EXTENSIONS or content_type.startswith("audio/"):
+        chunks, summary = process_audio(file_bytes, filename)
+        return chunks, summary, "audio"
+    if ext in IMAGE_EXTENSIONS or content_type.startswith("image/"):
+        chunks, summary = process_image(file_bytes, filename)
+        return chunks, summary, "image"
+    if ext == ".txt" or content_type.startswith("text/"):
+        chunks, summary = process_txt(file_bytes, filename)
+        return chunks, summary, "txt"
+    raise ValueError(f"Unsupported file type: {ext or content_type or 'unknown'}")
 
 
 # ── Document Summary ──────────────────────────────────────
