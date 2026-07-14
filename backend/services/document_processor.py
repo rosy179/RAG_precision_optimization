@@ -36,8 +36,14 @@ def _make_doc_id(name: str) -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _sliding_window_chunks(text: str, doc_id: str, title: str, source_type: str) -> list[dict]:
-    """Split text into overlapping word-window chunks."""
+def _sliding_window_chunks(text: str, doc_id: str, title: str, source_type: str,
+                           page_word_starts: Optional[list[int]] = None) -> list[dict]:
+    """Split text into overlapping word-window chunks.
+
+    page_word_starts: word index where each page begins (PDFs) — used to tag
+    every chunk with the 1-based page its first word falls on, so the UI can
+    jump straight to that page in the viewer.
+    """
     words = text.split()
     if not words:
         return []
@@ -46,16 +52,62 @@ def _sliding_window_chunks(text: str, doc_id: str, title: str, source_type: str)
     idx = 0
     while i < len(words):
         chunk_text = " ".join(words[i: i + CHUNK_SIZE])
-        chunks.append({
+        chunk = {
             "id":    f"{doc_id}_c{idx}",
             "text":  chunk_text,
             "title": title,
             "source": source_type,
             "doc_id": doc_id,
-        })
+        }
+        if page_word_starts:
+            page = 1
+            for p, start in enumerate(page_word_starts, 1):
+                if i >= start:
+                    page = p
+                else:
+                    break
+            chunk["page"] = page
+        chunks.append(chunk)
         i += CHUNK_SIZE - CHUNK_OVERLAP
         idx += 1
     return chunks
+
+
+def reconstruct_from_chunks(chunk_texts: list[str]) -> tuple[str, list[tuple[int, int]]]:
+    """Rebuild a document's canonical text from its ordered sliding-window
+    chunks, returning (text, [(char_start, char_end) per chunk]).
+
+    The overlap is found by suffix/prefix word matching rather than trusting
+    CHUNK_OVERLAP, so documents ingested under older chunking settings still
+    reconstruct correctly.
+    """
+    words: list[str] = []
+    ranges: list[tuple[int, int]] = []  # word ranges per chunk
+    for text in chunk_texts:
+        cw = text.split()
+        overlap = 0
+        max_k = min(len(words), len(cw))
+        for k in range(max_k, 0, -1):
+            if words[len(words) - k:] == cw[:k]:
+                overlap = k
+                break
+        start_word = len(words) - overlap
+        words.extend(cw[overlap:])
+        ranges.append((start_word, start_word + len(cw)))
+
+    # word index → char offset in " ".join(words)
+    char_at: list[int] = []
+    pos = 0
+    for w in words:
+        char_at.append(pos)
+        pos += len(w) + 1
+    text = " ".join(words)
+    offsets = [
+        (char_at[s] if s < len(char_at) else len(text),
+         (char_at[e - 1] + len(words[e - 1])) if 0 < e <= len(words) else len(text))
+        for s, e in ranges
+    ]
+    return text, offsets
 
 
 def _clean_text(text: str) -> str:
@@ -72,15 +124,20 @@ def process_pdf(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     Returns (chunks, doc_summary).
     """
     import pdfplumber, io
-    text_parts = []
+    # Track how many words each page contributes so chunks can be tagged
+    # with the page they start on (viewer jumps straight to it).
+    page_word_starts: list[int] = []
+    words: list[str] = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
+            page_word_starts.append(len(words))
             t = page.extract_text()
             if t:
-                text_parts.append(t)
-    full_text = _clean_text("\n\n".join(text_parts))
+                words.extend(_clean_text(t).split())
+    full_text = " ".join(words)
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(full_text, doc_id, filename, "pdf")
+    chunks = _sliding_window_chunks(full_text, doc_id, filename, "pdf",
+                                    page_word_starts=page_word_starts)
     summary = _generate_summary(full_text[:4000], filename)
     return chunks, summary
 
