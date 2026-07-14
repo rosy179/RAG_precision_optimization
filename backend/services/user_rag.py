@@ -54,7 +54,13 @@ NGUYÊN TẮC NỘI DUNG:
 - Nếu câu trả lời có nhiều khía cạnh, chia mục bằng tiêu đề "### ".
 - Dùng danh sách đánh số (1. 2. 3.) cho các bước hoặc quy trình.
 - Dùng bảng Markdown khi cần so sánh từ 2 đối tượng trở lên.
-- Không bao giờ dồn toàn bộ câu trả lời vào một dòng hay một đoạn văn duy nhất."""
+- Không bao giờ dồn toàn bộ câu trả lời vào một dòng hay một đoạn văn duy nhất.
+
+TRÍCH DẪN NGUỒN (bắt buộc):
+- Mỗi đoạn "Ngữ cảnh" được đánh số dạng [Nguồn 1: tên], [Nguồn 2: tên]...
+- Khi một ý lấy từ nguồn nào, chèn chỉ số [1], [2]... ngay sau ý đó (trước dấu chấm câu hoặc cuối gạch đầu dòng). Ví dụ: "- **RAG** kết hợp truy xuất và sinh văn bản [1]."
+- Một ý tổng hợp từ nhiều nguồn thì ghi liền các chỉ số: [1][3].
+- Chỉ dùng số nguồn có thật trong Ngữ cảnh; không chèn chỉ số cho ý lấy từ lịch sử hội thoại hay kiến thức chung."""
 
 # Rewrites follow-up questions ("dịch sang tiếng Nhật", "nói rõ hơn ý 2")
 # into standalone retrieval queries using the conversation history.
@@ -118,7 +124,7 @@ def _reattach_chunk_fields(fused: list[dict], *source_lists: list[dict]):
             by_id[c["id"]] = c
     for c in fused:
         orig = by_id.get(c["id"], {})
-        for key in ("score", "doc_id", "scope"):
+        for key in ("score", "doc_id", "scope", "page"):
             if key in orig:
                 c.setdefault(key, orig[key])
 
@@ -184,7 +190,8 @@ class UserRAGService:
         doc_id = doc_meta["id"]
         session_id = doc_meta.get("session_id", "")
 
-        # Upsert chunks into chunk collection
+        # Upsert chunks into chunk collection (page only exists for PDFs —
+        # Chroma metadata rejects None values, so include it conditionally)
         self._chunk_col.upsert(
             ids=[c["id"] for c in chunks],
             documents=[c["text"] for c in chunks],
@@ -194,6 +201,7 @@ class UserRAGService:
                 "title":  doc_meta["name"],
                 "source": doc_meta.get("type", "unknown"),
                 "chunk_index": i,
+                **({"page": c["page"]} if "page" in c else {}),
             } for i, c in enumerate(chunks)],
         )
 
@@ -209,7 +217,8 @@ class UserRAGService:
         for c in chunks:
             self._chunks_store.append({"id": c["id"], "text": c["text"],
                                        "title": doc_meta["name"], "doc_id": doc_id,
-                                       "session_id": session_id})
+                                       "session_id": session_id,
+                                       **({"page": c["page"]} if "page" in c else {})})
 
         # Update registry
         self._doc_registry.append({
@@ -240,25 +249,68 @@ class UserRAGService:
     def chunk_count(self) -> int:
         return self._chunk_col.count()
 
+    def get_document_content(self, doc_id: str) -> dict | None:
+        """Reconstruct a document's full text from its stored chunks for the
+        viewer, with per-chunk char offsets so a cited chunk can be
+        highlighted. Returns None if the doc has no chunks."""
+        res = self._chunk_col.get(where={"doc_id": doc_id},
+                                  include=["documents", "metadatas"])
+        if not res["ids"]:
+            return None
+        rows = sorted(
+            zip(res["ids"], res["documents"], res["metadatas"]),
+            key=lambda r: r[2].get("chunk_index", 0),
+        )
+        from backend.services.document_processor import reconstruct_from_chunks
+        text, offsets = reconstruct_from_chunks([r[1] for r in rows])
+        return {
+            "text": text,
+            "chunks": [{
+                "id": rid, "start": start, "end": end,
+                **({"page": meta["page"]} if "page" in meta else {}),
+            } for (rid, _, meta), (start, end) in zip(rows, offsets)],
+        }
+
     # ── Query ──────────────────────────────────────────────
 
-    def query(self, question: str, history: list[dict] | None = None,
-              session_id: str | None = None) -> dict:
+    def retrieve(self, question: str, history: list[dict] | None = None,
+                 session_id: str | None = None,
+                 include_doc_ids: list[str] | None = None,
+                 use_global_kb: bool = True) -> dict:
+        """Run the full retrieval stack (Layers 1-4) without generation.
+
+        Returns top_chunks + UI-ready sources so callers can either generate
+        in one shot (query) or stream tokens (generate_stream).
+
+        include_doc_ids: session doc ids the user checked in the source
+        picker (None = all session docs). use_global_kb=False excludes the
+        shared KB for this question.
+        """
         # Retrieval draws from two pools: chunks uploaded in THIS session
         # (per-conversation scope, as before) plus the shared global
         # knowledge base available to every user and session.
         kb = get_kb()
         session_chunks = [c for c in self._chunks_store
                           if not session_id or c.get("session_id") == session_id]
-        if not session_chunks and kb.is_empty():
+        if include_doc_ids is not None:
+            allowed = set(include_doc_ids)
+            session_chunks = [c for c in session_chunks if c.get("doc_id") in allowed]
+        kb_enabled = use_global_kb and not kb.is_empty()
+        if not session_chunks and not kb_enabled:
+            filtered_out = include_doc_ids is not None or not use_global_kb
             return {
-                "answer": ("Chưa có tài liệu nào — cả trong cuộc trò chuyện này lẫn kho "
-                           "kiến thức chung. Hãy đính kèm PDF, dán URL hoặc tải ảnh/ghi âm "
-                           "lên trước khi hỏi."),
+                "empty": True,
+                "notice": (
+                    "Tất cả nguồn tham khảo đang bị tắt. Hãy bật lại ít nhất một tài liệu "
+                    "hoặc kho kiến thức chung trong bộ chọn nguồn rồi hỏi lại."
+                    if filtered_out else
+                    "Chưa có tài liệu nào — cả trong cuộc trò chuyện này lẫn kho "
+                    "kiến thức chung. Hãy đính kèm PDF, dán URL hoặc tải ảnh/ghi âm "
+                    "lên trước khi hỏi."
+                ),
+                "top_chunks": [],
                 "sources": [],
-                "reasoning": "",
-                "latency_ms": 0,
-                "from_cache": False,
+                "complexity": "simple",
             }
 
         t0 = time.time()
@@ -277,8 +329,10 @@ class UserRAGService:
         # Layer 2 — Hierarchical: find relevant docs by summary, separately
         # per pool (session docs and global KB docs live in different
         # collections, so each needs its own doc-id shortlist).
+        allowed_ids = set(include_doc_ids) if include_doc_ids is not None else None
         session_docs = [d for d in self._doc_registry
-                        if not session_id or d.get("session_id") == session_id]
+                        if (not session_id or d.get("session_id") == session_id)
+                        and (allowed_ids is None or d["id"] in allowed_ids)]
         top_k_docs = min(5, len(session_docs))
         relevant_doc_ids: list[str] = []
         if top_k_docs > 0:
@@ -287,7 +341,12 @@ class UserRAGService:
                 kwargs["where"] = session_filter
             summary_res = self._summary_col.query(**kwargs)
             relevant_doc_ids = summary_res["ids"][0] if summary_res["ids"] else []
-        kb_doc_ids = kb.search_summaries(search_query, top_k=5)
+        if allowed_ids is not None:
+            # The summary shortlist isn't checkbox-aware — constrain it, and
+            # never fall through to an unfiltered chunk search.
+            relevant_doc_ids = [d for d in relevant_doc_ids if d in allowed_ids] \
+                or [d["id"] for d in session_docs]
+        kb_doc_ids = kb.search_summaries(search_query, top_k=5) if kb_enabled else []
 
         # Layer 3 — Advanced: Semantic + BM25 + RRF, over both pools
         semantic_chunks = []
@@ -316,18 +375,20 @@ class UserRAGService:
                         "doc_id": meta.get("doc_id", ""),
                         "scope":  "session",
                         "score":  round(1.0 - float(dist), 4),
+                        **({"page": meta["page"]} if "page" in meta else {}),
                     })
 
         # Both collections use the same embedding model and cosine space,
         # so their (1 - distance) scores are directly comparable.
         kb_semantic = kb.search_semantic(search_query, n_results=20,
-                                         doc_ids=kb_doc_ids or None)
+                                         doc_ids=kb_doc_ids or None) if kb_enabled else []
         semantic_chunks = sorted(semantic_chunks + kb_semantic,
                                  key=lambda c: c["score"], reverse=True)[:20]
 
         bm25_chunks = _merge_lexical(
-            self._bm25_search(search_query, n=20, session_id=session_id),
-            kb.search_bm25(search_query, n=20),
+            self._bm25_search(search_query, n=20, session_id=session_id,
+                              allowed_doc_ids=allowed_ids),
+            kb.search_bm25(search_query, n=20) if kb_enabled else [],
         )
 
         from hybrid_rag import reciprocal_rank_fusion
@@ -353,10 +414,16 @@ class UserRAGService:
             if hyde and hyde != search_query:
                 hyde_chunks = []
                 if session_chunks:
+                    hyde_filters = []
+                    if session_filter:
+                        hyde_filters.append(session_filter)
+                    if allowed_ids is not None:
+                        hyde_filters.append({"doc_id": {"$in": list(allowed_ids)}})
                     hyde_kwargs = {"query_texts": [hyde],
                                    "n_results": min(10, len(session_chunks))}
-                    if session_filter:
-                        hyde_kwargs["where"] = session_filter
+                    if hyde_filters:
+                        hyde_kwargs["where"] = (hyde_filters[0] if len(hyde_filters) == 1
+                                                else {"$and": hyde_filters})
                     hyde_res = self._chunk_col.query(**hyde_kwargs)
                     if hyde_res["ids"] and hyde_res["ids"][0]:
                         for i, cid in enumerate(hyde_res["ids"][0]):
@@ -368,8 +435,10 @@ class UserRAGService:
                                 "doc_id": meta.get("doc_id", ""),
                                 "scope": "session",
                                 "score": round(1.0 - float(dist), 4),
+                                **({"page": meta["page"]} if "page" in meta else {}),
                             })
-                hyde_chunks += kb.search_semantic(hyde, n_results=10)
+                if kb_enabled:
+                    hyde_chunks += kb.search_semantic(hyde, n_results=10)
                 fused2 = reciprocal_rank_fusion(top_chunks, hyde_chunks, top_k=top_k)
                 _reattach_chunk_fields(fused2, top_chunks, hyde_chunks)
                 top_chunks = fused2[:top_k]
@@ -378,28 +447,77 @@ class UserRAGService:
         for i, c in enumerate(top_chunks, 1):
             c["rank"] = i
 
-        # Layer 5 — Structured chat generation (grounded in top_chunks + history)
-        answer = self._generate_chat_answer(question, top_chunks, history)
-        reasoning = ""
-
-        latency = int((time.time() - t0) * 1000)
-
         sources = [{
-            "rank":    c.get("rank", i + 1),
-            "title":   c.get("title", "Unknown"),
-            "snippet": c.get("text", "")[:300],
-            "score":   _display_score(c),
-            "scope":   c.get("scope", "session"),  # "global" = shared KB
+            "rank":     c.get("rank", i + 1),
+            "title":    c.get("title", "Unknown"),
+            "snippet":  c.get("text", "")[:300],
+            "score":    _display_score(c),
+            "scope":    c.get("scope", "session"),  # "global" = shared KB
+            "doc_id":   c.get("doc_id", ""),
+            "chunk_id": c.get("id", ""),
+            **({"page": c["page"]} if c.get("page") else {}),
         } for i, c in enumerate(top_chunks)]
 
         return {
-            "answer":     answer,
-            "reasoning":  reasoning,
-            "sources":    sources,
-            "latency_ms": latency,
-            "from_cache": False,
-            "complexity": complexity,
+            "empty":        False,
+            "notice":       None,
+            "top_chunks":   top_chunks,
+            "sources":      sources,
+            "complexity":   complexity,
+            "retrieval_ms": int((time.time() - t0) * 1000),
         }
+
+    def query(self, question: str, history: list[dict] | None = None,
+              session_id: str | None = None,
+              include_doc_ids: list[str] | None = None,
+              use_global_kb: bool = True) -> dict:
+        t0 = time.time()
+        history = history or []
+        ret = self.retrieve(question, history, session_id,
+                            include_doc_ids=include_doc_ids,
+                            use_global_kb=use_global_kb)
+        if ret["empty"]:
+            return {"answer": ret["notice"], "sources": [], "reasoning": "",
+                    "latency_ms": 0, "from_cache": False, "complexity": "simple"}
+
+        # Layer 5 — Structured chat generation (grounded in top_chunks + history)
+        answer = self._generate_chat_answer(question, ret["top_chunks"], history)
+
+        return {
+            "answer":     answer,
+            "reasoning":  "",
+            "sources":    ret["sources"],
+            "latency_ms": int((time.time() - t0) * 1000),
+            "from_cache": False,
+            "complexity": ret["complexity"],
+        }
+
+    def generate_stream(self, question: str, chunks: list[dict],
+                        history: list[dict] | None = None):
+        """Yield answer text deltas (Layer 5, streaming variant).
+
+        openai.APIError propagates to the caller so the endpoint can emit
+        an SSE error event.
+        """
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            preview = chunks[0]["text"][:200] if chunks else "No context"
+            # Chunked mock so the UI streaming path is exercised without a key
+            mock = f"[MOCK ANSWER] Based on context: '{preview}...'"
+            for i in range(0, len(mock), 24):
+                yield mock[i:i + 24]
+            return
+
+        client = openai.OpenAI(api_key=self._api_key)
+        stream = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=self._chat_messages(question, chunks, history or []),
+            temperature=0.2,
+            max_tokens=1500,
+            stream=True,
+        )
+        for event in stream:
+            if event.choices and event.choices[0].delta.content:
+                yield event.choices[0].delta.content
 
     # ── Internals ──────────────────────────────────────────
 
@@ -433,17 +551,13 @@ class UserRAGService:
         except Exception:
             return question
 
-    def _generate_chat_answer(self, question: str, chunks: list[dict],
-                              history: list[dict]) -> str:
-        """Generate a structured Markdown answer for the chat UI.
+    def _chat_messages(self, question: str, chunks: list[dict],
+                       history: list[dict]) -> list[dict]:
+        """Build the LLM message list for chat generation.
 
         Includes recent conversation history so follow-up questions
         ("nó là gì?", "còn cách nào khác?") resolve correctly.
         """
-        if not self._api_key or self._api_key.startswith("sk-your"):
-            preview = chunks[0]["text"][:200] if chunks else "No context"
-            return f"[MOCK ANSWER] Based on context: '{preview}...'"
-
         context_str = "\n\n---\n\n".join(
             f"[Nguồn {c.get('rank', i + 1)}: {c.get('title', 'Unknown')}]\n{c['text']}"
             for i, c in enumerate(chunks)
@@ -457,22 +571,32 @@ class UserRAGService:
             "role": "user",
             "content": f"Ngữ cảnh:\n{context_str}\n\nCâu hỏi: {question}",
         })
+        return messages
+
+    def _generate_chat_answer(self, question: str, chunks: list[dict],
+                              history: list[dict]) -> str:
+        """Generate a structured Markdown answer for the chat UI in one shot."""
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            preview = chunks[0]["text"][:200] if chunks else "No context"
+            return f"[MOCK ANSWER] Based on context: '{preview}...'"
 
         client = openai.OpenAI(api_key=self._api_key)
         response = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=messages,
+            messages=self._chat_messages(question, chunks, history),
             temperature=0.2,
             max_tokens=1500,
         )
         return response.choices[0].message.content.strip()
 
     def _bm25_search(self, query: str, n: int = 20,
-                     session_id: str | None = None) -> list[dict]:
+                     session_id: str | None = None,
+                     allowed_doc_ids: set[str] | None = None) -> list[dict]:
         # Score only within the session's chunks so IDF weights are not
         # skewed by documents from other conversations.
         pool = [c for c in self._chunks_store
-                if not session_id or c.get("session_id") == session_id]
+                if (not session_id or c.get("session_id") == session_id)
+                and (allowed_doc_ids is None or c.get("doc_id") in allowed_doc_ids)]
         if not pool:
             return []
         bm25 = BM25Okapi([_tokenize(c["text"]) for c in pool])
@@ -504,6 +628,7 @@ class UserRAGService:
                     "id": cid, "text": text,
                     "title": meta.get("title", ""), "doc_id": doc_id,
                     "session_id": session_id,
+                    **({"page": meta["page"]} if "page" in meta else {}),
                 })
                 if doc_id not in chunk_by_doc:
                     chunk_by_doc[doc_id] = {"name": meta.get("title", ""), "type": meta.get("source", ""),

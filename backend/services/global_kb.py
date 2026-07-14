@@ -102,6 +102,7 @@ class GlobalKBService:
                     "title":  doc_meta["name"],
                     "source": doc_meta.get("type", "unknown"),
                     "chunk_index": i,
+                    **({"page": c["page"]} if "page" in c else {}),
                 } for i, c in enumerate(chunks)],
             )
             self._summary_col.upsert(
@@ -142,6 +143,27 @@ class GlobalKBService:
 
     def get_documents(self) -> list[dict]:
         return self._doc_registry
+
+    def get_document_content(self, doc_id: str) -> dict | None:
+        """Reconstruct a KB document's full text + per-chunk offsets for the
+        viewer (same contract as UserRAGService.get_document_content)."""
+        res = self._chunk_col.get(where={"doc_id": doc_id},
+                                  include=["documents", "metadatas"])
+        if not res["ids"]:
+            return None
+        rows = sorted(
+            zip(res["ids"], res["documents"], res["metadatas"]),
+            key=lambda r: r[2].get("chunk_index", 0),
+        )
+        from backend.services.document_processor import reconstruct_from_chunks
+        text, offsets = reconstruct_from_chunks([r[1] for r in rows])
+        return {
+            "text": text,
+            "chunks": [{
+                "id": rid, "start": start, "end": end,
+                **({"page": meta["page"]} if "page" in meta else {}),
+            } for (rid, _, meta), (start, end) in zip(rows, offsets)],
+        }
 
     def chunk_count(self) -> int:
         return len(self._chunks_store)
