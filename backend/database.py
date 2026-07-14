@@ -48,6 +48,8 @@ class Message(Base):
     sources_json = Column(Text, default="[]")
     # Names of documents the user attached alongside this message (user role only).
     attachments_json = Column(Text, default="[]")
+    # User rating on assistant messages: "up" | "down" | NULL (no rating).
+    feedback     = Column(String, nullable=True)
     created_at   = Column(DateTime, default=datetime.utcnow)
     session      = relationship("ChatSession", back_populates="messages")
 
@@ -77,6 +79,9 @@ def create_tables():
         msg_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(messages)"))]
         if "attachments_json" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN attachments_json TEXT DEFAULT '[]'"))
+            conn.commit()
+        if "feedback" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN feedback VARCHAR"))
             conn.commit()
 
 
