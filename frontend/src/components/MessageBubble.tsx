@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BookOpen, ChevronDown, ChevronUp, FileText, Globe, Image } from "lucide-react";
+import {
+  BookOpen, Check, ChevronDown, ChevronUp, Copy, FileText, Globe, Image,
+  RefreshCw, ThumbsDown, ThumbsUp,
+} from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
 
 export interface Source {
@@ -10,6 +13,9 @@ export interface Source {
   snippet: string;
   score: number;
   scope?: "session" | "global";
+  doc_id?: string;
+  chunk_id?: string;
+  page?: number;
 }
 
 export interface Message {
@@ -18,7 +24,18 @@ export interface Message {
   content: string;
   sources?: Source[];
   attachments?: string[];
+  feedback?: "up" | "down" | null;
+  /** true while SSE deltas are still arriving for this message */
+  streaming?: boolean;
   created_at?: string;
+}
+
+interface Props {
+  msg: Message;
+  onFeedback?: (messageId: string, rating: "up" | "down" | null) => void;
+  onRegenerate?: () => void;
+  /** Open the document viewer at this source's location */
+  onOpenSource?: (source: Source) => void;
 }
 
 const typeIcon = (title: string) => {
@@ -27,9 +44,69 @@ const typeIcon = (title: string) => {
   return <FileText className="w-3.5 h-3.5" />;
 };
 
-export default function MessageBubble({ msg }: { msg: Message }) {
+/** Turn bare [n] citation markers into markdown links (#cite-n) so the
+ *  custom renderer below can style them as chips. Code spans/fences are
+ *  left untouched ("arr[1]" in a snippet must not become a citation). */
+const linkifyCitations = (md: string, maxRank: number): string => {
+  if (maxRank < 1) return md;
+  return md
+    .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
+    .map((seg, i) => {
+      if (i % 2 === 1) return seg; // code segment — keep verbatim
+      return seg.replace(/\[(\d+)\](?!\()/g, (m, n) => {
+        const k = parseInt(n, 10);
+        return k >= 1 && k <= maxRank ? `[${n}](#cite-${n})` : m;
+      });
+    })
+    .join("");
+};
+
+function CitationChip({
+  n, source, onClick,
+}: { n: number; source?: Source; onClick: () => void }) {
+  return (
+    <span className="relative inline-block group" style={{ verticalAlign: "super", lineHeight: 1 }}>
+      <button
+        onClick={onClick}
+        className="text-[10px] font-semibold rounded-md px-1 min-w-[16px] transition-colors"
+        style={{
+          background: "rgba(124,58,237,0.12)",
+          color: "#7C3AED",
+          border: "1px solid rgba(124,58,237,0.2)",
+        }}
+        title={source ? undefined : `Nguồn ${n}`}
+      >
+        {n}
+      </button>
+      {source && (
+        <span
+          className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-72 rounded-xl px-3 py-2.5 text-left z-30 shadow-lg"
+          style={{
+            background: "rgba(255,255,255,0.97)",
+            border: "1px solid rgba(124,58,237,0.2)",
+            backdropFilter: "blur(12px)",
+          }}
+        >
+          <span className="block text-[11px] font-semibold text-[#1A1A2E] truncate">
+            {source.title}
+          </span>
+          <span className="block text-[11px] text-gray-500 mt-1 line-clamp-3 whitespace-normal">
+            {source.snippet}
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSource }: Props) {
   const [showSources, setShowSources] = useState(false);
+  const [highlightRank, setHighlightRank] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+  const highlightTimer = useRef<number>();
   const isUser = msg.role === "user";
+
+  useEffect(() => () => window.clearTimeout(highlightTimer.current), []);
 
   if (isUser) {
     return (
@@ -70,6 +147,26 @@ export default function MessageBubble({ msg }: { msg: Message }) {
     );
   }
 
+  const jumpToSource = (rank: number) => {
+    setShowSources(true);
+    setHighlightRank(rank);
+    window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlightRank(null), 1800);
+  };
+
+  const copyAnswer = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable */ }
+  };
+
+  // Feedback needs the server-side message id (uuid). Locally-created ids
+  // (Date.now()) mean the message never persisted — hide the buttons.
+  const canRate = !!onFeedback && msg.id.includes("-") && !msg.streaming;
+  const rendered = linkifyCitations(msg.content, msg.sources?.length ?? 0);
+
   return (
     <div className="flex items-start gap-3 mb-5">
       {/* AI Avatar — mini robot */}
@@ -90,15 +187,104 @@ export default function MessageBubble({ msg }: { msg: Message }) {
             color: "#1A1A2E",
           }}
         >
-          <div className="prose prose-sm max-w-none prose-p:my-1.5 prose-headings:text-[#1A1A2E] prose-headings:mt-3 prose-headings:mb-1.5 prose-h3:text-sm prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-strong:text-[#1A1A2E] prose-table:text-xs prose-th:px-2 prose-th:py-1.5 prose-td:px-2 prose-td:py-1.5 prose-code:font-mono prose-code:text-xs prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded"
-            style={{ ["--tw-prose-code-bg" as string]: "rgba(124,58,237,0.08)" }}
-          >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-          </div>
+          {msg.streaming && !msg.content ? (
+            <div className="flex items-center gap-1.5 py-1">
+              {[0, 150, 300].map((delay) => (
+                <div
+                  key={delay}
+                  className="w-2 h-2 rounded-full"
+                  style={{
+                    background: "linear-gradient(135deg, #7C3AED, #3B82F6)",
+                    animation: "dot-bounce 1.2s ease-in-out infinite",
+                    animationDelay: `${delay}ms`,
+                  }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="prose prose-sm max-w-none prose-p:my-1.5 prose-headings:text-[#1A1A2E] prose-headings:mt-3 prose-headings:mb-1.5 prose-h3:text-sm prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-strong:text-[#1A1A2E] prose-table:text-xs prose-th:px-2 prose-th:py-1.5 prose-td:px-2 prose-td:py-1.5 prose-code:font-mono prose-code:text-xs prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded"
+              style={{ ["--tw-prose-code-bg" as string]: "rgba(124,58,237,0.08)" }}
+            >
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ href, children }) => {
+                    if (href?.startsWith("#cite-")) {
+                      const n = parseInt(href.slice(6), 10);
+                      const src = msg.sources?.find((s) => s.rank === n) ?? msg.sources?.[n - 1];
+                      return (
+                        <CitationChip
+                          n={n}
+                          source={src}
+                          onClick={() => {
+                            // Old messages have no doc_id — fall back to the card list
+                            if (src?.doc_id && onOpenSource) onOpenSource(src);
+                            else jumpToSource(n);
+                          }}
+                        />
+                      );
+                    }
+                    return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+                  },
+                }}
+              >
+                {rendered}
+              </ReactMarkdown>
+              {msg.streaming && (
+                <span
+                  className="inline-block w-2 h-4 ml-0.5 rounded-sm align-text-bottom animate-pulse"
+                  style={{ background: "linear-gradient(135deg, #7C3AED, #3B82F6)" }}
+                />
+              )}
+            </div>
+          )}
         </div>
 
+        {/* Action row: copy / rate / regenerate */}
+        {!msg.streaming && msg.content && (
+          <div className="flex items-center gap-1 mt-1.5 ml-1">
+            <button
+              onClick={copyAnswer}
+              title="Sao chép câu trả lời"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-colors"
+            >
+              {copied ? <Check className="w-3.5 h-3.5" style={{ color: "#10B981" }} /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            {canRate && (
+              <>
+                <button
+                  onClick={() => onFeedback!(msg.id, msg.feedback === "up" ? null : "up")}
+                  title="Câu trả lời hữu ích"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hover:bg-[rgba(16,185,129,0.1)]"
+                  style={{ color: msg.feedback === "up" ? "#10B981" : "#9CA3AF" }}
+                >
+                  <ThumbsUp className="w-3.5 h-3.5" fill={msg.feedback === "up" ? "currentColor" : "none"} />
+                </button>
+                <button
+                  onClick={() => onFeedback!(msg.id, msg.feedback === "down" ? null : "down")}
+                  title="Câu trả lời chưa tốt"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hover:bg-[rgba(239,68,68,0.1)]"
+                  style={{ color: msg.feedback === "down" ? "#EF4444" : "#9CA3AF" }}
+                >
+                  <ThumbsDown className="w-3.5 h-3.5" fill={msg.feedback === "down" ? "currentColor" : "none"} />
+                </button>
+              </>
+            )}
+            {onRegenerate && (
+              <button
+                onClick={onRegenerate}
+                title="Tạo lại câu trả lời"
+                className="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Tạo lại
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Sources */}
-        {msg.sources && msg.sources.length > 0 && (
+        {msg.sources && msg.sources.length > 0 && !msg.streaming && (
           <div className="mt-2">
             <button
               onClick={() => setShowSources(!showSources)}
@@ -114,10 +300,19 @@ export default function MessageBubble({ msg }: { msg: Message }) {
                 {msg.sources.map((s) => (
                   <div
                     key={s.rank}
-                    className="flex items-start gap-2 rounded-2xl px-3 py-2.5 shadow-sm"
+                    onClick={() => { if (s.doc_id && onOpenSource) onOpenSource(s); }}
+                    role={s.doc_id && onOpenSource ? "button" : undefined}
+                    title={s.doc_id && onOpenSource ? "Mở tài liệu tại đoạn này" : undefined}
+                    className={`flex items-start gap-2 rounded-2xl px-3 py-2.5 shadow-sm transition-all ${
+                      s.doc_id && onOpenSource ? "cursor-pointer hover:shadow-md" : ""
+                    }`}
                     style={{
-                      background: "rgba(255,255,255,0.65)",
-                      border: "1px solid rgba(124,58,237,0.15)",
+                      background: highlightRank === s.rank
+                        ? "rgba(124,58,237,0.1)"
+                        : "rgba(255,255,255,0.65)",
+                      border: highlightRank === s.rank
+                        ? "1px solid rgba(124,58,237,0.45)"
+                        : "1px solid rgba(124,58,237,0.15)",
                       backdropFilter: "blur(10px)",
                     }}
                   >
@@ -128,7 +323,12 @@ export default function MessageBubble({ msg }: { msg: Message }) {
                       {typeIcon(s.title)}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-xs font-semibold text-[#1A1A2E] truncate">{s.title}</p>
+                      <p className="text-xs font-semibold text-[#1A1A2E] truncate">
+                        <span style={{ color: "#7C3AED" }}>[{s.rank}]</span> {s.title}
+                        {s.page && (
+                          <span className="ml-1.5 font-normal text-gray-400">· tr.{s.page}</span>
+                        )}
+                      </p>
                       <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{s.snippet}</p>
                     </div>
                     {s.scope === "global" && (

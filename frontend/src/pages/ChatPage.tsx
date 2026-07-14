@@ -2,11 +2,14 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Send, Mic, Paperclip, X, Globe,
   Loader2, Square, CheckCircle2, AlertCircle,
+  BookOpen, FileText, SlidersHorizontal,
 } from "lucide-react";
-import { sessionsAPI, documentsAPI } from "../api/client";
+import { sessionsAPI, documentsAPI, knowledgeAPI, chatStream } from "../api/client";
 import MessageBubble from "../components/MessageBubble";
 import AiRobotIcon from "../components/AiRobotIcon";
-import type { Message } from "../components/MessageBubble";
+import DocViewerPanel from "../components/DocViewerPanel";
+import type { ViewerTarget } from "../components/DocViewerPanel";
+import type { Message, Source } from "../components/MessageBubble";
 
 interface Props { sessionId: string | null; onSessionCreated: (id: string) => void; }
 
@@ -15,6 +18,13 @@ interface Attachment {
   name: string;
   status: "uploading" | "done" | "error";
   detail?: string;
+}
+
+interface SessionDoc {
+  id: string;
+  name: string;
+  type: string;
+  chunk_count: number;
 }
 
 const DOC_ACCEPT = ".pdf,.txt";
@@ -33,6 +43,13 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   const [urlTip, setUrlTip] = useState(false);
   const [recording, setRecording] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
+  const [viewerTarget, setViewerTarget] = useState<ViewerTarget | null>(null);
+  // Source picker: which session docs + the shared KB take part in answers
+  const [sessionDocs, setSessionDocs] = useState<SessionDoc[]>([]);
+  const [kbDocCount, setKbDocCount] = useState(0);
+  const [excludedDocs, setExcludedDocs] = useState<Set<string>>(new Set());
+  const [useGlobalKb, setUseGlobalKb] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -40,15 +57,36 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const sessionIdRef = useRef<string | null>(sessionId);
   const pendingDocsRef = useRef<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
       pendingDocsRef.current = [];
+      prevCountRef.current = 0; // reset so bulk-load scroll fires correctly
       setAttachments([]);
       setInputFocused(false);
+      setViewerTarget(null);
+      setExcludedDocs(new Set());
+      setUseGlobalKb(true);
+      setPickerOpen(false);
     }
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  const refreshSessionDocs = useCallback((sid: string | null) => {
+    if (!sid) { setSessionDocs([]); return; }
+    documentsAPI.list(sid)
+      .then((data) => setSessionDocs(data.documents || []))
+      .catch(() => setSessionDocs([]));
+  }, []);
+
+  useEffect(() => { refreshSessionDocs(sessionId); }, [sessionId, refreshSessionDocs]);
+
+  useEffect(() => {
+    knowledgeAPI.list()
+      .then((data) => setKbDocCount((data.documents || []).length))
+      .catch(() => setKbDocCount(0));
+  }, []);
 
   const ensureSession = useCallback(async (notify: boolean) => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -78,13 +116,32 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Chỉ cuộn trong khung tin nhắn (scrollIntoView cuộn cả các container cha
-    // làm lệch toàn bộ layout). Mở session cũ thì nhảy thẳng xuống cuối,
-    // tin nhắn mới thêm vào thì cuộn mượt.
-    const appended = messages.length === prevCountRef.current + 1;
-    prevCountRef.current = messages.length;
-    el.scrollTo({ top: el.scrollHeight, behavior: appended ? "smooth" : "auto" });
-  }, [messages, sending]);
+    const newCount = messages.length;
+    const prevCount = prevCountRef.current;
+    prevCountRef.current = newCount;
+
+    if (newCount === 0) return; // session cleared
+
+    const isStreaming = messages.some((m) => m.streaming);
+
+    // Bulk load (switched session): wait one paint cycle then jump to bottom
+    if (prevCount === 0 && newCount > 1) {
+      requestAnimationFrame(() => {
+        el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+      });
+      return;
+    }
+    // New single message appended (user sent or AI placeholder added): smooth scroll
+    if (newCount === prevCount + 1) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      return;
+    }
+    // Streaming in progress: keep following new tokens
+    if (isStreaming) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+    }
+    // Source expand, rating, feedback → do NOT hijack scroll position
+  }, [messages]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -120,7 +177,8 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
         ));
       }
     }
-  }, [ensureSession]);
+    refreshSessionDocs(sid);
+  }, [ensureSession, refreshSessionDocs]);
 
   const addUrlAsDocument = useCallback(async (url: string) => {
     const id = `${Date.now()}-url`;
@@ -132,12 +190,13 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
       setAttachments((p) => p.map((a) =>
         a.id === id ? { ...a, name: res.name || url, status: "done" as const, detail: `${res.chunk_count} chunks` } : a
       ));
+      refreshSessionDocs(sid);
     } catch (e: any) {
       setAttachments((p) => p.map((a) =>
         a.id === id ? { ...a, status: "error" as const, detail: e?.response?.data?.detail || "Không thể fetch URL" } : a
       ));
     }
-  }, [ensureSession]);
+  }, [ensureSession, refreshSessionDocs]);
 
   const openPicker = useCallback((accept: string) => {
     const el = fileInputRef.current;
@@ -192,6 +251,74 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     setRecording(false);
   }, []);
 
+  const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }, []);
+
+  /** Drive one SSE exchange into the placeholder assistant message `aiId`. */
+  const runStream = useCallback(async (
+    sid: string,
+    aiId: string,
+    body: { question: string; history: object[]; attachments?: string[]; regenerate_message_id?: string },
+  ) => {
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    let content = "";
+    try {
+      await chatStream(sid, body, {
+        onMeta: (meta) => patchMessage(aiId, { sources: meta.sources as Source[] }),
+        onDelta: (text) => {
+          content += text;
+          patchMessage(aiId, { content });
+        },
+        onDone: (done) => {
+          // Swap in the DB id last so feedback targets the persisted row.
+          patchMessage(aiId, { streaming: false, ...(done.message_id ? { id: done.message_id } : {}) });
+        },
+        onError: (detail) => {
+          content = content || detail;
+          patchMessage(aiId, { content, streaming: false });
+        },
+      }, ctrl.signal);
+    } catch (err: any) {
+      if (err?.name !== "AbortError") {
+        patchMessage(aiId, {
+          content: content || "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.",
+          streaming: false,
+        });
+      }
+      // Aborted: keep the partial answer (backend persists it too)
+    } finally {
+      abortRef.current = null;
+      setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
+      setSending(false);
+    }
+  }, [patchMessage]);
+
+  const stopStreaming = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  /** Chat-body fields reflecting the source picker state. */
+  const sourceParams = useCallback(() => ({
+    ...(excludedDocs.size > 0
+      ? { include_doc_ids: sessionDocs.filter((d) => !excludedDocs.has(d.id)).map((d) => d.id) }
+      : {}),
+    use_global_kb: useGlobalKb,
+  }), [excludedDocs, sessionDocs, useGlobalKb]);
+
+  const openSource = useCallback((s: Source) => {
+    if (!s.doc_id) return;
+    setViewerTarget({
+      docId: s.doc_id,
+      scope: s.scope === "global" ? "global" : "session",
+      title: s.title,
+      page: s.page,
+      chunkId: s.chunk_id,
+      snippet: s.snippet,
+    });
+  }, []);
+
   const send = useCallback(async () => {
     const q = input.trim();
     if (!q || sending) return;
@@ -204,33 +331,49 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     setAttachments((p) => p.filter((a) => a.status !== "done"));
 
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: q, attachments: attached };
-    setMessages((prev) => [...prev, userMsg]);
+    const aiId = (Date.now() + 1).toString();
+    setMessages((prev) => [...prev, userMsg, { id: aiId, role: "assistant", content: "", streaming: true }]);
     setInput("");
     setSending(true);
 
     const history = messages.slice(-6).map((m) => ({ role: m.role, content: m.content }));
+    await runStream(sid, aiId, { question: q, history, attachments: attached, ...sourceParams() });
+    if (isNewSession) onSessionCreated(sid);
+  }, [input, sending, messages, ensureSession, onSessionCreated, runStream, sourceParams]);
+
+  const regenerate = useCallback(async () => {
+    if (sending || !sessionIdRef.current) return;
+    // Last assistant message + the user question that produced it
+    let ai = messages.length - 1;
+    while (ai >= 0 && messages[ai].role !== "assistant") ai--;
+    if (ai < 0) return;
+    let ui = ai - 1;
+    while (ui >= 0 && messages[ui].role !== "user") ui--;
+    if (ui < 0) return;
+
+    const aiMsg = messages[ai];
+    const question = messages[ui].content;
+    const history = messages.slice(0, ui).slice(-6).map((m) => ({ role: m.role, content: m.content }));
+
+    patchMessage(aiMsg.id, { content: "", sources: undefined, feedback: null, streaming: true });
+    setSending(true);
+    await runStream(sessionIdRef.current, aiMsg.id, {
+      question,
+      history,
+      // Only persisted messages (uuid ids) can be replaced server-side
+      ...(aiMsg.id.includes("-") ? { regenerate_message_id: aiMsg.id } : {}),
+      ...sourceParams(),
+    });
+  }, [messages, sending, patchMessage, runStream, sourceParams]);
+
+  const handleFeedback = useCallback(async (messageId: string, rating: "up" | "down" | null) => {
+    patchMessage(messageId, { feedback: rating });
     try {
-      const data = await sessionsAPI.chat(sid, q, history, attached);
-      const aiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: data.answer,
-        sources: data.sources,
-      };
-      setMessages((prev) => [...prev, aiMsg]);
-      if (isNewSession) onSessionCreated(sid);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessages((prev) => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: detail || "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.",
-      }]);
-      if (isNewSession) onSessionCreated(sid);
-    } finally {
-      setSending(false);
+      await sessionsAPI.feedback(messageId, rating);
+    } catch {
+      patchMessage(messageId, { feedback: null });
     }
-  }, [input, sending, messages, ensureSession, onSessionCreated]);
+  }, [patchMessage]);
 
   const handleKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -267,7 +410,11 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
 
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto"
+          style={{ overflowAnchor: "none" }}
+        >
           {isEmpty ? (
             /* ── Greeting: fades & slides up when input is focused ── */
             <div
@@ -289,36 +436,20 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
             </div>
           ) : (
             /* ── Messages ── */
-            <div className="px-20 py-6">
-              {messages.map((m) => <MessageBubble key={m.id} msg={m} />)}
-              {sending && (
-                <div className="flex items-center gap-3 mb-4">
-                  <AiRobotIcon mini />
-                  <div
-                    className="rounded-3xl rounded-tl-md px-5 py-4"
-                    style={{
-                      background: "rgba(255,255,255,0.72)",
-                      backdropFilter: "blur(16px)",
-                      border: "1px solid rgba(255,255,255,0.85)",
-                      boxShadow: "0 4px 24px rgba(124,58,237,0.08)",
-                    }}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      {[0, 150, 300].map((delay) => (
-                        <div
-                          key={delay}
-                          className="w-2 h-2 rounded-full"
-                          style={{
-                            background: "linear-gradient(135deg, #7C3AED, #3B82F6)",
-                            animation: `dot-bounce 1.2s ease-in-out infinite`,
-                            animationDelay: `${delay}ms`,
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
+            <div className="px-20 pt-6 pb-16">
+              {messages.map((m, i) => (
+                <MessageBubble
+                  key={m.id}
+                  msg={m}
+                  onFeedback={handleFeedback}
+                  onOpenSource={openSource}
+                  onRegenerate={
+                    !sending && m.role === "assistant" && i === messages.length - 1
+                      ? regenerate
+                      : undefined
+                  }
+                />
+              ))}
             </div>
           )}
         </div>
@@ -425,6 +556,62 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                 </div>
               )}
 
+              {/* Source picker popover */}
+              {pickerOpen && (
+                <div
+                  className="mb-3 rounded-2xl px-3 py-3"
+                  style={{
+                    background: "rgba(255,255,255,0.9)",
+                    border: "1px solid rgba(124,58,237,0.18)",
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-[#1A1A2E]">Nguồn tham khảo cho câu hỏi</p>
+                    <button onClick={() => setPickerOpen(false)} className="text-gray-400 hover:text-gray-600">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-[#1A1A2E] py-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useGlobalKb}
+                      onChange={(e) => setUseGlobalKb(e.target.checked)}
+                      className="accent-[#7C3AED]"
+                    />
+                    <BookOpen className="w-3.5 h-3.5" style={{ color: "#3B82F6" }} />
+                    <span>Kho kiến thức chung <span className="text-gray-400">({kbDocCount} tài liệu)</span></span>
+                  </label>
+                  {sessionDocs.length > 0 ? (
+                    <div className="max-h-40 overflow-y-auto mt-1 space-y-0.5">
+                      {sessionDocs.map((d) => (
+                        <label key={d.id} className="flex items-center gap-2 text-xs text-[#1A1A2E] py-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={!excludedDocs.has(d.id)}
+                            onChange={(e) => {
+                              setExcludedDocs((prev) => {
+                                const next = new Set(prev);
+                                if (e.target.checked) next.delete(d.id);
+                                else next.add(d.id);
+                                return next;
+                              });
+                            }}
+                            className="accent-[#7C3AED]"
+                          />
+                          <FileText className="w-3.5 h-3.5 shrink-0" style={{ color: "#7C3AED" }} />
+                          <span className="truncate flex-1">{d.name}</span>
+                          <span className="text-gray-400 shrink-0">{d.chunk_count} chunks</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Chưa có tài liệu nào trong cuộc trò chuyện này.
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Main row: textarea + action buttons */}
               <div className="flex items-center gap-3">
                 <textarea
@@ -442,6 +629,35 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
 
                 {/* Action buttons */}
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {/* Source picker button */}
+                  <button
+                    onClick={() => setPickerOpen((v) => !v)}
+                    title="Chọn nguồn tham khảo cho câu hỏi"
+                    className="relative w-9 h-9 rounded-2xl flex items-center justify-center transition-all duration-200"
+                    style={
+                      pickerOpen
+                        ? {
+                            background: "rgba(124,58,237,0.14)",
+                            color: "#7C3AED",
+                            border: "1px solid rgba(124,58,237,0.3)",
+                          }
+                        : {
+                            background: "rgba(16,185,129,0.06)",
+                            color: "#6EE7B7",
+                            border: "1px solid rgba(16,185,129,0.12)",
+                          }
+                    }
+                  >
+                    <SlidersHorizontal className="w-4 h-4" />
+                    {(excludedDocs.size > 0 || !useGlobalKb) && (
+                      <span
+                        className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
+                        style={{ background: "#F59E0B", border: "2px solid #fff" }}
+                        title="Đang lọc nguồn"
+                      />
+                    )}
+                  </button>
+
                   {/* Mic button */}
                   <button
                     onClick={recording ? stopRecording : startRecording}
@@ -502,14 +718,19 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                     <Paperclip className="w-4 h-4" />
                   </button>
 
-                  {/* Send button */}
+                  {/* Send / Stop button */}
                   <button
-                    onClick={send}
-                    disabled={!input.trim() || sending}
+                    onClick={sending ? stopStreaming : send}
+                    disabled={!sending && !input.trim()}
+                    title={sending ? "Dừng tạo câu trả lời" : "Gửi"}
                     className="h-9 px-4 rounded-2xl flex items-center gap-2 text-white text-xs font-semibold transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{
-                      background: "linear-gradient(135deg, #7C3AED, #3B82F6)",
-                      boxShadow: "0 4px 16px rgba(124,58,237,0.45)",
+                      background: sending
+                        ? "linear-gradient(135deg, #EF4444, #DC2626)"
+                        : "linear-gradient(135deg, #7C3AED, #3B82F6)",
+                      boxShadow: sending
+                        ? "0 4px 16px rgba(239,68,68,0.45)"
+                        : "0 4px 16px rgba(124,58,237,0.45)",
                       minWidth: "2.25rem",
                     }}
                     onMouseEnter={(e) => {
@@ -520,12 +741,16 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                       }
                     }}
                     onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = "linear-gradient(135deg, #7C3AED, #3B82F6)";
-                      (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 16px rgba(124,58,237,0.45)";
+                      (e.currentTarget as HTMLElement).style.background = sending
+                        ? "linear-gradient(135deg, #EF4444, #DC2626)"
+                        : "linear-gradient(135deg, #7C3AED, #3B82F6)";
+                      (e.currentTarget as HTMLElement).style.boxShadow = sending
+                        ? "0 4px 16px rgba(239,68,68,0.45)"
+                        : "0 4px 16px rgba(124,58,237,0.45)";
                       (e.currentTarget as HTMLElement).style.transform = "";
                     }}
                   >
-                    {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {sending ? <Square className="w-4 h-4" /> : <Send className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
@@ -548,6 +773,43 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
           />
         </div>{/* end shrink-0 flex flex-col */}
       </div>
+
+      {/* Document viewer (citation click-through) — fixed side drawer */}
+      {viewerTarget && (
+        <>
+          {/* Semi-transparent backdrop: click to close */}
+          <div
+            aria-label="Đóng tài liệu"
+            onClick={() => setViewerTarget(null)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15,10,30,0.22)",
+              backdropFilter: "blur(2px)",
+              WebkitBackdropFilter: "blur(2px)",
+              zIndex: 40,
+              animation: "fadeIn 0.2s ease",
+            }}
+          />
+          {/* Drawer panel */}
+          <div
+            style={{
+              position: "fixed",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: "min(44%, 560px)",
+              zIndex: 41,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)",
+            }}
+          >
+            <DocViewerPanel target={viewerTarget} onClose={() => setViewerTarget(null)} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
