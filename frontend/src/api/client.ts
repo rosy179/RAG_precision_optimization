@@ -1,6 +1,8 @@
 import axios from "axios";
 
-const api = axios.create({ baseURL: "http://localhost:8000" });
+const API_BASE = "http://localhost:8000";
+
+const api = axios.create({ baseURL: API_BASE });
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
@@ -38,11 +40,116 @@ export const sessionsAPI = {
   messages: (id: string) => api.get(`/api/sessions/${id}/messages`).then((r) => r.data),
   chat: (id: string, question: string, history: object[], attachments: string[] = []) =>
     api.post(`/api/sessions/${id}/chat`, { question, history, attachments }).then((r) => r.data),
+  feedback: (messageId: string, rating: "up" | "down" | null) =>
+    api.post(`/api/messages/${messageId}/feedback`, { rating }).then((r) => r.data),
 };
 
+// ── Streaming chat (SSE over fetch — axios can't stream) ──
+export interface StreamMeta { sources: object[]; complexity: string }
+export interface StreamDone {
+  latency_ms: number;
+  message_id?: string;
+  user_message_id?: string;
+  session_title?: string;
+}
+export interface StreamCallbacks {
+  onMeta?: (meta: StreamMeta) => void;
+  onDelta?: (text: string) => void;
+  onDone?: (done: StreamDone) => void;
+  onError?: (detail: string) => void;
+}
+
+export async function chatStream(
+  sessionId: string,
+  body: {
+    question: string;
+    history: object[];
+    attachments?: string[];
+    regenerate_message_id?: string;
+    include_doc_ids?: string[];
+    use_global_kb?: boolean;
+  },
+  cb: StreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  const token = localStorage.getItem("token");
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (res.status === 401) {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    window.location.href = "/login";
+    return;
+  }
+  if (!res.ok || !res.body) {
+    let detail = "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.";
+    try {
+      detail = (await res.json()).detail || detail;
+    } catch { /* non-JSON error body */ }
+    cb.onError?.(detail);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    // SSE frames end with a blank line
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      let data = "";
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7).trim();
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      if (!data) continue;
+      try {
+        const parsed = JSON.parse(data);
+        if (event === "meta") cb.onMeta?.(parsed);
+        else if (event === "delta") cb.onDelta?.(parsed.text);
+        else if (event === "done") cb.onDone?.(parsed);
+        else if (event === "error") cb.onError?.(parsed.detail);
+      } catch { /* skip malformed frame */ }
+    }
+  }
+}
+
 // ── Documents ─────────────────────────────────────────────
+export interface DocContent {
+  id: string;
+  name: string;
+  type: string;
+  has_file: boolean;
+  text: string;
+  chunks: { id: string; start: number; end: number; page?: number }[];
+}
+
+/** Auth headers for direct fetch/react-pdf requests that bypass axios. */
+export const authHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem("token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
 export const documentsAPI = {
-  list: () => api.get("/api/documents").then((r) => r.data),
+  list: (sessionId?: string) =>
+    api.get("/api/documents", { params: sessionId ? { session_id: sessionId } : {} })
+      .then((r) => r.data),
+  content: (docId: string): Promise<DocContent> =>
+    api.get(`/api/documents/${docId}/content`).then((r) => r.data),
+  fileUrl: (docId: string) => `${API_BASE}/api/documents/${docId}/file`,
   uploadFile: (file: File, sessionId: string) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -56,4 +163,12 @@ export const documentsAPI = {
     return api.post("/api/documents/upload", fd).then((r) => r.data);
   },
   delete: (id: string) => api.delete(`/api/documents/${id}`).then((r) => r.data),
+};
+
+// ── Global knowledge base ─────────────────────────────────
+export const knowledgeAPI = {
+  list: () => api.get("/api/knowledge").then((r) => r.data),
+  content: (docId: string): Promise<DocContent> =>
+    api.get(`/api/knowledge/${docId}/content`).then((r) => r.data),
+  fileUrl: (docId: string) => `${API_BASE}/api/knowledge/${docId}/file`,
 };
