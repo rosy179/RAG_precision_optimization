@@ -5,6 +5,8 @@ import {
   RefreshCw,
   Search,
   Edit,
+  Activity,
+  BookOpen,
   PanelLeftClose,
   Settings,
   LogOut,
@@ -24,6 +26,10 @@ interface Props {
   refreshKey: number;
   isOpen: boolean;
   onToggle: () => void;
+  knowledgeActive: boolean;
+  onOpenKnowledge: () => void;
+  dashboardActive: boolean;
+  onOpenDashboard: () => void;
 }
 
 function groupByDate(sessions: Session[]) {
@@ -51,7 +57,11 @@ export default function SessionSidebar({
   onDelete,
   refreshKey,
   isOpen,
-  onToggle
+  onToggle,
+  knowledgeActive,
+  onOpenKnowledge,
+  dashboardActive,
+  onOpenDashboard
 }: Props) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
@@ -147,6 +157,24 @@ export default function SessionSidebar({
           <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm hover:bg-black/5 transition-colors">
             <Search className="w-4 h-4" />
             Tìm kiếm đoạn chat
+          </button>
+          <button
+            onClick={onOpenKnowledge}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-colors ${
+              knowledgeActive ? "bg-black/10 font-semibold" : "hover:bg-black/5"
+            }`}
+          >
+            <BookOpen className="w-4 h-4" style={{ color: "#3B82F6" }} />
+            Kho kiến thức
+          </button>
+          <button
+            onClick={onOpenDashboard}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-colors ${
+              dashboardActive ? "bg-black/10 font-semibold" : "hover:bg-black/5"
+            }`}
+          >
+            <Activity className="w-4 h-4" style={{ color: "#7C3AED" }} />
+            Thống kê
           </button>
         </div>
 

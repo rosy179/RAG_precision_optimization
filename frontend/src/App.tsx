@@ -3,6 +3,8 @@ import { PanelLeftOpen } from "lucide-react";
 import { useAuth } from "./hooks/useAuth";
 import AuthPage from "./pages/AuthPage";
 import ChatPage from "./pages/ChatPage";
+import KnowledgePage from "./pages/KnowledgePage";
+import DashboardPage from "./pages/DashboardPage";
 import SessionSidebar from "./components/SessionSidebar";
 import { sessionsAPI } from "./api/client";
 
@@ -11,6 +13,7 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarKey, setSidebarKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [view, setView] = useState<"chat" | "knowledge" | "dashboard">("chat");
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen((prev) => !prev);
@@ -25,6 +28,12 @@ export default function App() {
 
   const handleNewChat = useCallback(async () => {
     setActiveSessionId(null);
+    setView("chat");
+  }, []);
+
+  const handleSelectSession = useCallback((id: string) => {
+    setActiveSessionId(id);
+    setView("chat");
   }, []);
 
   const handleDeleteSession = useCallback(async (id: string) => {
@@ -60,12 +69,16 @@ export default function App() {
         user={user}
         onLogout={logout}
         onNewChat={handleNewChat}
-        activeId={activeSessionId}
-        onSelect={setActiveSessionId}
+        activeId={view === "chat" ? activeSessionId : null}
+        onSelect={handleSelectSession}
         onDelete={handleDeleteSession}
         refreshKey={sidebarKey}
         isOpen={sidebarOpen}
         onToggle={toggleSidebar}
+        knowledgeActive={view === "knowledge"}
+        onOpenKnowledge={() => setView("knowledge")}
+        dashboardActive={view === "dashboard"}
+        onOpenDashboard={() => setView("dashboard")}
       />
 
       {/* Chat area */}
@@ -78,10 +91,16 @@ export default function App() {
             <PanelLeftOpen className="w-5 h-5" />
           </button>
         )}
-        <ChatPage
-          sessionId={activeSessionId}
-          onSessionCreated={handleSessionCreated}
-        />
+        {view === "knowledge" ? (
+          <KnowledgePage />
+        ) : view === "dashboard" ? (
+          <DashboardPage />
+        ) : (
+          <ChatPage
+            sessionId={activeSessionId}
+            onSessionCreated={handleSessionCreated}
+          />
+        )}
       </div>
       </div>
     </div>
