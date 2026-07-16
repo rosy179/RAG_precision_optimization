@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  BookOpen, Check, ChevronDown, ChevronUp, Copy, FileText, Globe, Image,
-  RefreshCw, ThumbsDown, ThumbsUp,
+  BookOpen, Check, ChevronDown, ChevronUp, Copy, FileText, GitBranch, Globe,
+  Image, Loader2, RefreshCw, ThumbsDown, ThumbsUp,
 } from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
+import type { MultihopStep } from "../api/client";
 
 export interface Source {
   rank: number;
@@ -25,6 +26,8 @@ export interface Message {
   sources?: Source[];
   attachments?: string[];
   feedback?: "up" | "down" | null;
+  /** Multi-hop reasoning steps (chained retrieval) */
+  steps?: MultihopStep[];
   /** true while SSE deltas are still arriving for this message */
   streaming?: boolean;
   created_at?: string;
@@ -96,6 +99,93 @@ function CitationChip({
         </span>
       )}
     </span>
+  );
+}
+
+interface HopView {
+  hop: number;
+  total?: number;
+  query?: string;
+  answer?: string;
+  titles?: string[];
+}
+
+/** Live view of the multi-hop reasoning chain: each hop shows the search
+ *  query (often containing a fact discovered by the PREVIOUS hop) and the
+ *  short bridging answer it produced. */
+function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const hops = useMemo<HopView[]>(() => {
+    const map = new Map<number, HopView>();
+    for (const s of steps) {
+      const h = map.get(s.hop) ?? { hop: s.hop };
+      if (s.stage === "hop_start") { h.query = s.query; h.total = s.total; }
+      else { h.answer = s.answer; h.titles = s.titles; }
+      map.set(s.hop, h);
+    }
+    return [...map.values()].sort((a, b) => a.hop - b.hop);
+  }, [steps]);
+
+  if (hops.length === 0) return null;
+  const total = hops[0]?.total ?? hops.length;
+  const expanded = streaming || open;
+
+  return (
+    <div
+      className="mb-2 rounded-2xl overflow-hidden"
+      style={{
+        background: "rgba(124,58,237,0.05)",
+        border: "1px solid rgba(124,58,237,0.18)",
+      }}
+    >
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3.5 py-2 text-xs font-semibold transition-colors hover:bg-[rgba(124,58,237,0.06)]"
+        style={{ color: "#7C3AED" }}
+      >
+        <GitBranch className="w-3.5 h-3.5 shrink-0" />
+        {streaming
+          ? `Đang suy luận nhiều bước (${hops.length}/${total})…`
+          : `Suy luận qua ${hops.length} bước tìm kiếm`}
+        {streaming
+          ? <Loader2 className="w-3 h-3 animate-spin ml-auto" />
+          : (expanded ? <ChevronUp className="w-3.5 h-3.5 ml-auto" /> : <ChevronDown className="w-3.5 h-3.5 ml-auto" />)}
+      </button>
+
+      {expanded && (
+        <div className="px-3.5 pb-3 space-y-2">
+          {hops.map((h) => (
+            <div key={h.hop} className="flex items-start gap-2.5">
+              <span
+                className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5"
+                style={{ background: "rgba(124,58,237,0.14)", color: "#7C3AED" }}
+              >
+                {h.hop}
+              </span>
+              <div className="min-w-0 flex-1 text-xs">
+                <p className="text-[#1A1A2E] leading-snug">
+                  <span className="font-medium text-gray-500">Tìm: </span>
+                  {h.query}
+                </p>
+                {h.answer ? (
+                  <p className="mt-1 leading-snug" style={{ color: "#047857" }}>
+                    <span className="font-medium">↳ </span>
+                    {h.answer}
+                    {h.titles && h.titles.length > 0 && (
+                      <span className="text-gray-400"> — {h.titles[0]}</span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="mt-1 flex items-center gap-1.5 text-gray-400">
+                    <Loader2 className="w-3 h-3 animate-spin" /> đang tìm…
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -175,6 +265,11 @@ export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSou
       </div>
 
       <div className="flex-1 min-w-0">
+        {/* Multi-hop reasoning chain (if the router chose chained retrieval) */}
+        {msg.steps && msg.steps.length > 0 && (
+          <MultihopSteps steps={msg.steps} streaming={msg.streaming} />
+        )}
+
         {/* Answer card */}
         <div
           className="rounded-3xl rounded-tl-md px-5 py-4 text-sm leading-relaxed"

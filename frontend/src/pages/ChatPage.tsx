@@ -267,6 +267,11 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     try {
       await chatStream(sid, body, {
         onMeta: (meta) => patchMessage(aiId, { sources: meta.sources as Source[] }),
+        onStep: (step) => {
+          setMessages((prev) => prev.map((m) =>
+            m.id === aiId ? { ...m, steps: [...(m.steps ?? []), step] } : m
+          ));
+        },
         onDelta: (text) => {
           content += text;
           patchMessage(aiId, { content });
@@ -274,6 +279,8 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
         onDone: (done) => {
           // Swap in the DB id last so feedback targets the persisted row.
           patchMessage(aiId, { streaming: false, ...(done.message_id ? { id: done.message_id } : {}) });
+          // First exchange sets an LLM-generated title — refresh the sidebar
+          if (done.session_title) onSessionCreated(sid);
         },
         onError: (detail) => {
           content = content || detail;
@@ -293,7 +300,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
       setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
       setSending(false);
     }
-  }, [patchMessage]);
+  }, [patchMessage, onSessionCreated]);
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
@@ -355,7 +362,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     const question = messages[ui].content;
     const history = messages.slice(0, ui).slice(-6).map((m) => ({ role: m.role, content: m.content }));
 
-    patchMessage(aiMsg.id, { content: "", sources: undefined, feedback: null, streaming: true });
+    patchMessage(aiMsg.id, { content: "", sources: undefined, feedback: null, steps: [], streaming: true });
     setSending(true);
     await runStream(sessionIdRef.current, aiMsg.id, {
       question,
