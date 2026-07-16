@@ -45,7 +45,15 @@ export const sessionsAPI = {
 };
 
 // ── Streaming chat (SSE over fetch — axios can't stream) ──
-export interface StreamMeta { sources: object[]; complexity: string }
+export interface StreamMeta { sources: object[]; complexity: string; n_hops?: number }
+export interface MultihopStep {
+  stage: "hop_start" | "hop_done";
+  hop: number;
+  total?: number;
+  query?: string;
+  answer?: string;
+  titles?: string[];
+}
 export interface StreamDone {
   latency_ms: number;
   message_id?: string;
@@ -54,6 +62,7 @@ export interface StreamDone {
 }
 export interface StreamCallbacks {
   onMeta?: (meta: StreamMeta) => void;
+  onStep?: (step: MultihopStep) => void;
   onDelta?: (text: string) => void;
   onDone?: (done: StreamDone) => void;
   onError?: (detail: string) => void;
@@ -119,6 +128,7 @@ export async function chatStream(
       try {
         const parsed = JSON.parse(data);
         if (event === "meta") cb.onMeta?.(parsed);
+        else if (event === "step") cb.onStep?.(parsed);
         else if (event === "delta") cb.onDelta?.(parsed.text);
         else if (event === "done") cb.onDone?.(parsed);
         else if (event === "error") cb.onError?.(parsed.detail);
@@ -166,9 +176,51 @@ export const documentsAPI = {
 };
 
 // ── Global knowledge base ─────────────────────────────────
+export interface KbDoc {
+  id: string;
+  name: string;
+  type: string;
+  chunk_count: number;
+  created_at: string;
+}
+
 export const knowledgeAPI = {
-  list: () => api.get("/api/knowledge").then((r) => r.data),
+  list: (): Promise<{ documents: KbDoc[]; total_chunks: number; can_manage: boolean }> =>
+    api.get("/api/knowledge").then((r) => r.data),
   content: (docId: string): Promise<DocContent> =>
     api.get(`/api/knowledge/${docId}/content`).then((r) => r.data),
   fileUrl: (docId: string) => `${API_BASE}/api/knowledge/${docId}/file`,
+  uploadFile: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return api.post("/api/knowledge/upload", fd).then((r) => r.data);
+  },
+  uploadUrl: (url: string) => {
+    const fd = new FormData();
+    fd.append("url", url);
+    return api.post("/api/knowledge/upload", fd).then((r) => r.data);
+  },
+  delete: (docId: string) => api.delete(`/api/knowledge/${docId}`).then((r) => r.data),
+  reload: () => api.post("/api/knowledge/reload").then((r) => r.data),
+};
+
+// ── Monitoring ────────────────────────────────────────────
+export interface MonitoringStats {
+  window_days: number;
+  n_queries: number;
+  errors: number;
+  aborted: number;
+  error_rate: number;
+  latency_ms: { avg: number; p50: number; p95: number; p99: number };
+  total_cost_usd: number;
+  total_tokens: number;
+  by_complexity: Record<string, number>;
+  multihop_queries: number;
+  feedback: { up: number; down: number };
+  per_day: { date: string; queries: number; cost_usd: number; multihop: number }[];
+}
+
+export const monitoringAPI = {
+  stats: (days = 14): Promise<MonitoringStats> =>
+    api.get("/api/monitoring/stats", { params: { days } }).then((r) => r.data),
 };
