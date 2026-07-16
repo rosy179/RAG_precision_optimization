@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import (
-    create_engine, Column, String, Text, DateTime, ForeignKey, Integer, text
+    create_engine, Column, String, Text, DateTime, Float, ForeignKey, Integer, text
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, relationship
 
@@ -50,6 +50,8 @@ class Message(Base):
     attachments_json = Column(Text, default="[]")
     # User rating on assistant messages: "up" | "down" | NULL (no rating).
     feedback     = Column(String, nullable=True)
+    # Multi-hop reasoning steps shown in the UI (assistant messages only).
+    steps_json   = Column(Text, default="[]")
     created_at   = Column(DateTime, default=datetime.utcnow)
     session      = relationship("ChatSession", back_populates="messages")
 
@@ -68,6 +70,22 @@ class Document(Base):
     user        = relationship("User", back_populates="documents")
 
 
+class QueryLog(Base):
+    """One row per chat query — powers the monitoring dashboard."""
+    __tablename__ = "query_logs"
+    id          = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id     = Column(String, ForeignKey("users.id"), nullable=False)
+    session_id  = Column(String, nullable=False)
+    complexity  = Column(String, default="medium")   # simple|medium|complex|multihop
+    multihop    = Column(Integer, default=0)          # number of hops (0 = normal path)
+    latency_ms  = Column(Integer, default=0)
+    tokens_in   = Column(Integer, default=0)          # estimated
+    tokens_out  = Column(Integer, default=0)          # estimated
+    cost_usd    = Column(Float, default=0.0)          # estimated
+    status      = Column(String, default="success")   # success|error|aborted
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+
 def create_tables():
     Base.metadata.create_all(bind=engine)
     # Lightweight migration: create_all never alters existing tables.
@@ -82,6 +100,9 @@ def create_tables():
             conn.commit()
         if "feedback" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN feedback VARCHAR"))
+            conn.commit()
+        if "steps_json" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN steps_json TEXT DEFAULT '[]'"))
             conn.commit()
 
 

@@ -6,6 +6,7 @@ from backend.api.auth import router as auth_router
 from backend.api.documents import router as docs_router
 from backend.api.chat import router as chat_router
 from backend.api.knowledge import router as knowledge_router
+from backend.api.monitoring import router as monitoring_router
 
 app = FastAPI(title="IT RAG Chatbot API", version="1.0.0")
 
@@ -37,4 +38,5 @@ async def health():
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(docs_router, prefix="/api/documents", tags=["documents"])
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["knowledge"])
+app.include_router(monitoring_router, prefix="/api/monitoring", tags=["monitoring"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])

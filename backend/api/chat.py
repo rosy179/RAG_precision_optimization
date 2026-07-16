@@ -8,11 +8,40 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from backend.database import get_db, ChatSession, Document, Message, SessionLocal, User
+from backend.database import (
+    get_db, ChatSession, Document, Message, QueryLog, SessionLocal, User,
+)
 from backend.api.auth import get_current_user
-from backend.services.user_rag import get_service, openai_error_detail
+from backend.services.user_rag import get_service, generate_session_title, openai_error_detail
 
 router = APIRouter()
+
+# gpt-4o-mini pricing (USD per token) for dashboard cost estimates
+_PRICE_IN  = 0.15 / 1_000_000
+_PRICE_OUT = 0.60 / 1_000_000
+
+
+def _log_query(db2: Session, user_id: str, session_id: str, complexity: str,
+               n_hops: int, latency_ms: int, answer: str, n_sources: int,
+               status: str):
+    """Best-effort per-query log for the monitoring dashboard.
+
+    Token counts are rough estimates (context size dominates input; each hop
+    adds a router/hop LLM call) — good enough for cost trends, not billing.
+    """
+    try:
+        tokens_in = 400 + n_sources * 500 + n_hops * 1500
+        tokens_out = max(1, len(answer) // 4) + n_hops * 60
+        db2.add(QueryLog(
+            user_id=user_id, session_id=session_id, complexity=complexity,
+            multihop=n_hops, latency_ms=latency_ms,
+            tokens_in=tokens_in, tokens_out=tokens_out,
+            cost_usd=tokens_in * _PRICE_IN + tokens_out * _PRICE_OUT,
+            status=status,
+        ))
+        db2.commit()
+    except Exception:
+        db2.rollback()
 
 
 class ChatRequest(BaseModel):
@@ -83,6 +112,7 @@ def get_messages(
             "sources":     json.loads(m.sources_json or "[]"),
             "attachments": json.loads(m.attachments_json or "[]"),
             "feedback":    m.feedback,
+            "steps":       json.loads(m.steps_json or "[]"),
             "created_at":  m.created_at.isoformat(),
         }
         for m in session.messages
@@ -130,7 +160,7 @@ def chat(
 
     # Auto-title the session after first message
     if session.title == "New Chat":
-        session.title = req.question[:60] + ("…" if len(req.question) > 60 else "")
+        session.title = generate_session_title(req.question, result["answer"])
 
     db.commit()
 
@@ -169,15 +199,18 @@ def chat_stream(
 
     rag = get_service(current_user.id)
 
-    def persist(db2: Session, answer: str, sources: list[dict]) -> dict:
+    def persist(db2: Session, answer: str, sources: list[dict],
+                steps: list[dict] | None = None) -> dict:
         """Save the exchange; returns the ids the UI needs for feedback."""
         ids: dict = {}
+        steps_json = json.dumps(steps or [], ensure_ascii=False)
         if req.regenerate_message_id:
             msg = db2.query(Message).filter(Message.id == req.regenerate_message_id).first()
             if msg:
                 msg.content = answer
                 msg.sources_json = json.dumps(sources, ensure_ascii=False)
                 msg.feedback = None  # old rating applied to the old answer
+                msg.steps_json = steps_json
                 msg.created_at = datetime.utcnow()
                 ids["message_id"] = msg.id
         else:
@@ -193,11 +226,12 @@ def chat_stream(
                 role="assistant",
                 content=answer,
                 sources_json=json.dumps(sources, ensure_ascii=False),
+                steps_json=steps_json,
             )
             db2.add(ai_msg)
             sess = db2.query(ChatSession).filter(ChatSession.id == session_id).first()
             if sess and sess.title == "New Chat":
-                sess.title = req.question[:60] + ("…" if len(req.question) > 60 else "")
+                sess.title = generate_session_title(req.question, answer)
                 ids["session_title"] = sess.title
             db2.flush()
             ids["user_message_id"] = user_msg.id
@@ -212,32 +246,87 @@ def chat_stream(
         t0 = time.time()
         parts: list[str] = []
         sources: list[dict] = []
-        try:
-            try:
-                ret = rag.retrieve(req.question, req.history, session_id=session_id,
-                                   include_doc_ids=req.include_doc_ids,
-                                   use_global_kb=req.use_global_kb)
-            except openai.APIError as e:
-                yield _sse("error", {"detail": openai_error_detail(e)})
-                return
-            sources = ret["sources"]
-            yield _sse("meta", {"sources": sources, "complexity": ret["complexity"]})
+        steps: list[dict] = []
+        complexity = "medium"
+        n_hops = 0
 
-            if ret["empty"]:
-                parts.append(ret["notice"])
-                yield _sse("delta", {"text": ret["notice"]})
-            else:
+        def log(status: str):
+            _log_query(db2, current_user.id, session_id, complexity, n_hops,
+                       int((time.time() - t0) * 1000), "".join(parts),
+                       len(sources), status)
+
+        try:
+            # Layer 1 — Adaptive router: medium/complex questions get one
+            # extra LLM call deciding whether they need chained retrieval
+            # (bridging entity discovered in hop 1 feeds hop 2's query).
+            # Bridging questions often read as "medium" to the heuristic
+            # ("Who received X for the work that enabled Y?"), so gating on
+            # complex-only would never fire. Simple lookups skip the router
+            # entirely — zero added latency.
+            from adaptive_rag import classify_heuristic
+            complexity = classify_heuristic(req.question)
+            sub_questions: list[str] = []
+            if complexity in ("medium", "complex") and rag.has_any_source(
+                    session_id, req.include_doc_ids, req.use_global_kb):
+                sub_questions = rag.route_multihop(req.question)
+
+            if sub_questions:
+                complexity = "multihop"
+                n_hops = len(sub_questions)
+                yield _sse("meta", {"sources": [], "complexity": "multihop",
+                                    "n_hops": n_hops})
                 try:
-                    for delta in rag.generate_stream(req.question, ret["top_chunks"],
-                                                     req.history):
-                        parts.append(delta)
-                        yield _sse("delta", {"text": delta})
+                    for kind, payload in rag.multihop_events(
+                            req.question, sub_questions, req.history,
+                            session_id=session_id,
+                            include_doc_ids=req.include_doc_ids,
+                            use_global_kb=req.use_global_kb):
+                        if kind == "step":
+                            steps.append(payload)
+                            yield _sse("step", payload)
+                        elif kind == "sources":
+                            sources = payload["sources"]
+                            yield _sse("meta", {"sources": sources,
+                                                "complexity": "multihop",
+                                                "n_hops": n_hops})
+                        else:  # delta
+                            parts.append(payload)
+                            yield _sse("delta", {"text": payload})
                 except openai.APIError as e:
                     yield _sse("error", {"detail": openai_error_detail(e)})
                     if not parts:
-                        return  # nothing to save — same as old non-stream behavior
+                        log("error")
+                        return
+            else:
+                try:
+                    ret = rag.retrieve(req.question, req.history, session_id=session_id,
+                                       include_doc_ids=req.include_doc_ids,
+                                       use_global_kb=req.use_global_kb)
+                except openai.APIError as e:
+                    yield _sse("error", {"detail": openai_error_detail(e)})
+                    log("error")
+                    return
+                sources = ret["sources"]
+                complexity = ret["complexity"]
+                yield _sse("meta", {"sources": sources, "complexity": complexity})
 
-            ids = persist(db2, "".join(parts).strip(), sources)
+                if ret["empty"]:
+                    parts.append(ret["notice"])
+                    yield _sse("delta", {"text": ret["notice"]})
+                else:
+                    try:
+                        for delta in rag.generate_stream(req.question, ret["top_chunks"],
+                                                         req.history):
+                            parts.append(delta)
+                            yield _sse("delta", {"text": delta})
+                    except openai.APIError as e:
+                        yield _sse("error", {"detail": openai_error_detail(e)})
+                        if not parts:
+                            log("error")
+                            return  # nothing to save — same as old behavior
+
+            ids = persist(db2, "".join(parts).strip(), sources, steps)
+            log("success")
             yield _sse("done", {
                 "latency_ms": int((time.time() - t0) * 1000),
                 **ids,
@@ -246,7 +335,8 @@ def chat_stream(
             # Client aborted (Stop button / closed tab): keep the partial
             # answer so the conversation stays coherent on reload.
             if parts:
-                persist(db2, "".join(parts).strip(), sources)
+                persist(db2, "".join(parts).strip(), sources, steps)
+                log("aborted")
             raise
         finally:
             db2.close()
