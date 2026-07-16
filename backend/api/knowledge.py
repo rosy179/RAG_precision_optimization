@@ -23,12 +23,16 @@ from backend.services.user_rag import openai_error_detail
 router = APIRouter()
 
 
-def require_kb_admin(current_user: User = Depends(get_current_user)) -> User:
+def can_manage_kb(user: User) -> bool:
     """If ADMIN_EMAILS (comma-separated) is set in the environment, only
     those accounts may modify the shared KB; otherwise any signed-in user
     can — convenient for development, lock it down in production."""
     admins = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
-    if admins and current_user.email.lower() not in admins:
+    return not admins or user.email.lower() in admins
+
+
+def require_kb_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not can_manage_kb(current_user):
         raise HTTPException(403, "Chỉ quản trị viên mới được thay đổi kho kiến thức chung")
     return current_user
 
@@ -96,7 +100,17 @@ def list_knowledge(current_user: User = Depends(get_current_user)):
             "created_at":  d.get("created_at", ""),
         } for d in kb.get_documents()],
         "total_chunks": kb.chunk_count(),
+        # UI hides the upload/delete controls for non-admins
+        "can_manage": can_manage_kb(current_user),
     }
+
+
+@router.post("/reload")
+def reload_knowledge(current_user: User = Depends(require_kb_admin)):
+    """Re-read the KB from disk — picks up bulk ingests done by
+    scripts/ingest_knowledge.py without restarting the server."""
+    stats = get_kb().reload()
+    return {"success": True, **stats}
 
 
 @router.get("/{doc_id}/content")
