@@ -105,7 +105,9 @@ def run_ragas_evaluation(eval_data: dict, run_name="baseline") -> dict:
         )
 
         def safe_mean(values):
-            clean_values = [v for v in values if v is not None]
+            # Ragas marks failed rows as NaN (not None) — drop both, else a
+            # single failed row poisons the whole aggregate.
+            clean_values = [v for v in values if v is not None and v == v]
             return sum(clean_values) / len(clean_values) if clean_values else 0.0
 
         results = {
