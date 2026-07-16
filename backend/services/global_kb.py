@@ -171,47 +171,81 @@ class GlobalKBService:
     def is_empty(self) -> bool:
         return not self._chunks_store
 
+    def reload(self) -> dict:
+        """Re-read the persisted Chroma collections into memory (registry +
+        BM25 index). Lets bulk ingests done by scripts/ingest_knowledge.py in
+        a separate process show up without restarting the server."""
+        with self._write_lock:
+            self._chunks_store = []
+            self._doc_registry = []
+            self._bm25_state = (None, [])
+            self._restore_from_chroma()
+        return {"documents": len(self._doc_registry), "chunks": len(self._chunks_store)}
+
     # ── Search (consumed by UserRAGService.query) ──────────
 
-    def search_summaries(self, query: str, top_k: int = 5) -> list[str]:
-        """Doc ids of the KB documents most relevant to the query."""
+    def search_summaries(self, queries: str | list[str], top_k: int = 5) -> list[str]:
+        """Doc ids of the KB documents most relevant to the query (multiple
+        query variants — e.g. original + English translation — are unioned)."""
+        if isinstance(queries, str):
+            queries = [queries]
         n = min(top_k, len(self._doc_registry))
         if n == 0:
             return []
-        res = self._summary_col.query(query_texts=[query], n_results=n)
-        return res["ids"][0] if res["ids"] else []
+        res = self._summary_col.query(query_texts=queries, n_results=n)
+        out: list[str] = []
+        seen: set = set()
+        for id_list in (res["ids"] or []):
+            for did in id_list:
+                if did not in seen:
+                    seen.add(did)
+                    out.append(did)
+        return out
 
-    def search_semantic(self, query: str, n_results: int = 20,
+    def search_semantic(self, queries: str | list[str], n_results: int = 20,
                         doc_ids: Optional[list[str]] = None) -> list[dict]:
+        if isinstance(queries, str):
+            queries = [queries]
         n = min(n_results, len(self._chunks_store))
         if n == 0:
             return []
-        kwargs = {"query_texts": [query], "n_results": n}
+        kwargs = {"query_texts": queries, "n_results": n}
         if doc_ids:
             kwargs["where"] = {"doc_id": {"$in": doc_ids}}
         res = self._chunk_col.query(**kwargs)
-        out = []
-        if res["ids"] and res["ids"][0]:
-            for i, cid in enumerate(res["ids"][0]):
-                meta = res["metadatas"][0][i] if res["metadatas"] else {}
-                dist = res["distances"][0][i] if res["distances"] else 1.0
-                out.append({
+        # A chunk found by several query variants keeps its best score
+        best: dict[str, dict] = {}
+        for qi in range(len(res["ids"] or [])):
+            for i, cid in enumerate(res["ids"][qi]):
+                meta = res["metadatas"][qi][i] if res["metadatas"] else {}
+                dist = res["distances"][qi][i] if res["distances"] else 1.0
+                score = round(1.0 - float(dist), 4)
+                if cid in best and best[cid]["score"] >= score:
+                    continue
+                best[cid] = {
                     "id":     cid,
-                    "text":   res["documents"][0][i],
+                    "text":   res["documents"][qi][i],
                     "title":  meta.get("title", ""),
                     "source": meta.get("source", ""),
                     "doc_id": meta.get("doc_id", ""),
                     "scope":  "global",
-                    "score":  round(1.0 - float(dist), 4),
-                })
-        return out
+                    "score":  score,
+                    **({"page": meta["page"]} if "page" in meta else {}),
+                }
+        return sorted(best.values(), key=lambda c: c["score"], reverse=True)[:n]
 
-    def search_bm25(self, query: str, n: int = 20) -> list[dict]:
+    def search_bm25(self, queries: str | list[str], n: int = 20) -> list[dict]:
+        if isinstance(queries, str):
+            queries = [queries]
         bm25, pool = self._bm25_state
         if bm25 is None:
             return []
-        scores = bm25.get_scores(_tokenize(query))
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:n]
+        merged = [0.0] * len(pool)
+        for q in queries:
+            for idx, score in enumerate(bm25.get_scores(_tokenize(q))):
+                if score > merged[idx]:
+                    merged[idx] = score
+        ranked = sorted(enumerate(merged), key=lambda x: x[1], reverse=True)[:n]
         return [{"id": pool[idx]["id"], "text": pool[idx]["text"],
                  "title": pool[idx]["title"], "doc_id": pool[idx]["doc_id"],
                  "scope": "global", "score": round(float(score), 4)}

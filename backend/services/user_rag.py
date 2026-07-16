@@ -46,6 +46,7 @@ NGUYÊN TẮC NỘI DUNG:
 2. Với yêu cầu trình bày lại nội dung đã trả lời trước đó (dịch sang ngôn ngữ khác, tóm tắt, rút gọn, đổi định dạng), hãy THỰC HIỆN dựa trên câu trả lời trước trong lịch sử hội thoại và ngữ cảnh — không được từ chối vì lý do "chỉ dùng ngữ cảnh".
 3. Nếu ngữ cảnh không đủ để trả lời trọn vẹn, trả lời phần có thể và nói rõ phần nào còn thiếu thông tin.
 4. Khách quan và chính xác: giữ nguyên số liệu, tên riêng, thuật ngữ trong tài liệu; giải thích ngắn gọn thuật ngữ khó.
+4b. Khi NHIỀU đoạn ngữ cảnh chứa dữ kiện có vẻ cùng trả lời câu hỏi (ví dụ nhiều mốc năm, nhiều tên chương trình), hãy đối chiếu từng dữ kiện với ĐÚNG chủ thể và phạm vi của câu hỏi (toàn tổ chức ≠ một đơn vị con; "đầu tiên/bắt đầu" = mốc sớm nhất) rồi chọn dữ kiện khớp trực tiếp nhất; nếu vẫn mơ hồ, nêu cả hai và giải thích khác biệt.
 5. Ngôn ngữ trả lời: nếu người dùng yêu cầu ngôn ngữ cụ thể (ví dụ "bằng tiếng Nhật") thì dùng đúng ngôn ngữ đó; nếu không, trả lời bằng ngôn ngữ của câu hỏi.
 
 ĐỊNH DẠNG BẮT BUỘC (Markdown):
@@ -61,6 +62,46 @@ TRÍCH DẪN NGUỒN (bắt buộc):
 - Khi một ý lấy từ nguồn nào, chèn chỉ số [1], [2]... ngay sau ý đó (trước dấu chấm câu hoặc cuối gạch đầu dòng). Ví dụ: "- **RAG** kết hợp truy xuất và sinh văn bản [1]."
 - Một ý tổng hợp từ nhiều nguồn thì ghi liền các chỉ số: [1][3].
 - Chỉ dùng số nguồn có thật trong Ngữ cảnh; không chèn chỉ số cho ý lấy từ lịch sử hội thoại hay kiến thức chung."""
+
+# Router + decomposer for Multi-Hop RAG: only invoked for heuristically
+# complex questions, so simple lookups pay zero extra latency.
+MULTIHOP_ROUTE_PROMPT = """\
+Bạn là bộ định tuyến truy vấn cho hệ thống RAG. Câu hỏi CẦN multi-hop khi phải \
+tìm một thực thể/dữ kiện trung gian trước, rồi mới dùng nó để tìm tiếp câu trả lời \
+(ví dụ: "Ai nhận giải X cho công trình đứng sau hệ thống Y?" — phải tìm "công trình \
+đứng sau Y" trước).
+
+Nếu câu hỏi trả lời được bằng MỘT lần tìm kiếm (kể cả câu so sánh/giải thích thông \
+thường), trả về đúng một từ: SINGLE
+
+Nếu cần multi-hop, trả về 2-3 truy vấn con theo thứ tự, mỗi truy vấn một dòng, \
+không đánh số, không giải thích. Truy vấn sau được phép tham chiếu kết quả của \
+truy vấn trước. Dùng cùng ngôn ngữ với câu hỏi.
+
+Câu hỏi: {question}"""
+
+MULTIHOP_HOP_PROMPT = """\
+Bạn là trợ lý chính xác. Trả lời truy vấn con CHỈ dựa trên ngữ cảnh dưới đây.
+Nếu ngữ cảnh không chứa câu trả lời, trả về đúng: NOT FOUND
+Trả lời NGẮN GỌN (tối đa 2 câu), giữ nguyên tên riêng/số liệu, cùng ngôn ngữ với truy vấn.
+
+Ngữ cảnh:
+{context}
+
+Truy vấn con: {sub_question}
+
+Trả lời ngắn:"""
+
+# Cross-lingual retrieval fix: the corpus is predominantly English, and every
+# stage degrades on a non-English query — ada-002 cross-lingual similarity is
+# weak, BM25 has zero term overlap, and the ms-marco CrossEncoder only
+# understands English. Retrieval therefore also runs an English translation
+# of the query; the ANSWER language still follows the user's question.
+TRANSLATE_QUERY_PROMPT = """\
+Dịch truy vấn tìm kiếm sau sang tiếng Anh để tìm trong kho tài liệu tiếng Anh.
+- Giữ nguyên tên riêng, thuật ngữ kỹ thuật, số liệu.
+- Nếu truy vấn đã là tiếng Anh, trả lại nguyên văn.
+Chỉ trả về bản dịch, không giải thích."""
 
 # Rewrites follow-up questions ("dịch sang tiếng Nhật", "nói rõ hơn ý 2")
 # into standalone retrieval queries using the conversation history.
@@ -129,6 +170,44 @@ def _reattach_chunk_fields(fused: list[dict], *source_lists: list[dict]):
                 c.setdefault(key, orig[key])
 
 
+# The Vietnamese system prompt biases gpt-4o-mini toward Vietnamese answers
+# regardless of the question's language — pin the answer language explicitly.
+_JA_RE = re.compile(r'[぀-ヿㇰ-ㇿｦ-ﾟ一-鿿]')
+_VI_RE = re.compile(
+    r'[àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợ'
+    r'ùúủũụưừứửữựỳýỷỹỵ]', re.IGNORECASE)
+
+
+def _lang_directive(question: str) -> str:
+    """Explicit answer-language instruction based on the question's language.
+    Uses the first non-empty line so multi-hop scaffolding (Vietnamese framing
+    text appended below the question) can't skew detection."""
+    head = next((l for l in question.splitlines() if l.strip()), question)
+    if _JA_RE.search(head):
+        return ("QUAN TRỌNG: Câu hỏi bằng tiếng Nhật — toàn bộ câu trả lời phải bằng "
+                "tiếng Nhật (回答はすべて日本語で書いてください), trừ khi người dùng "
+                "yêu cầu rõ một ngôn ngữ khác.")
+    if _VI_RE.search(head):
+        return ("QUAN TRỌNG: Trả lời hoàn toàn bằng tiếng Việt, trừ khi người dùng "
+                "yêu cầu rõ một ngôn ngữ khác.")
+    return ("IMPORTANT: The question is in English — write the ENTIRE answer in "
+            "English, unless the user explicitly asked for another language.")
+
+
+def _chunks_to_sources(chunks: list[dict]) -> list[dict]:
+    """UI-ready source cards for a list of retrieved chunks."""
+    return [{
+        "rank":     c.get("rank", i + 1),
+        "title":    c.get("title", "Unknown"),
+        "snippet":  c.get("text", "")[:300],
+        "score":    _display_score(c),
+        "scope":    c.get("scope", "session"),  # "global" = shared KB
+        "doc_id":   c.get("doc_id", ""),
+        "chunk_id": c.get("id", ""),
+        **({"page": c["page"]} if c.get("page") else {}),
+    } for i, c in enumerate(chunks)]
+
+
 def _display_score(chunk: dict) -> float:
     """Normalize a chunk's relevance score to 0-1 for the UI badge.
 
@@ -139,6 +218,32 @@ def _display_score(chunk: dict) -> float:
     if "rerank_score" in chunk:
         return round(1.0 / (1.0 + math.exp(-chunk["rerank_score"])), 4)
     return round(max(0.0, min(1.0, chunk.get("score", 0.0))), 4)
+
+
+def generate_session_title(question: str, answer: str = "") -> str:
+    """Short LLM-generated conversation title; falls back to a truncated
+    question in mock mode or on any API failure."""
+    fallback = question[:60] + ("…" if len(question) > 60 else "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key or api_key.startswith("sk-your"):
+        return fallback
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        res = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": (
+                "Đặt tiêu đề thật ngắn gọn (tối đa 8 từ, không dấu ngoặc kép, "
+                "không dấu chấm cuối) tóm tắt chủ đề đoạn hội thoại sau. "
+                "Dùng đúng ngôn ngữ của câu hỏi.\n\n"
+                f"Câu hỏi: {question[:300]}\n\nTrả lời: {answer[:300]}"
+            )}],
+            temperature=0.2,
+            max_tokens=30,
+        )
+        title = (res.choices[0].message.content or "").strip().strip('"').strip()
+        return title[:60] if title else fallback
+    except Exception:
+        return fallback
 
 
 def openai_error_detail(e: openai.APIError) -> str:
@@ -322,9 +427,20 @@ class UserRAGService:
         # Generation still sees the original question + history.
         search_query = self._condense_question(question, history)
 
+        # Non-English queries also search via an English translation (the
+        # ASCII check is a cheap language proxy: VI diacritics / CJK fail it).
+        queries = [search_query]
+        if not search_query.isascii():
+            translated = self._translate_to_english(search_query)
+            if translated and translated.lower() != search_query.lower():
+                queries.append(translated)
+        # English-side query: the CrossEncoder, HyDE and the keyword-based
+        # complexity heuristic all only work well in English.
+        q_en = queries[-1]
+
         # Layer 1 — Adaptive Router
         from adaptive_rag import classify_heuristic
-        complexity = classify_heuristic(search_query)
+        complexity = classify_heuristic(q_en)
 
         # Layer 2 — Hierarchical: find relevant docs by summary, separately
         # per pool (session docs and global KB docs live in different
@@ -336,17 +452,23 @@ class UserRAGService:
         top_k_docs = min(5, len(session_docs))
         relevant_doc_ids: list[str] = []
         if top_k_docs > 0:
-            kwargs = {"query_texts": [search_query], "n_results": top_k_docs}
+            kwargs = {"query_texts": queries, "n_results": top_k_docs}
             if session_filter:
                 kwargs["where"] = session_filter
             summary_res = self._summary_col.query(**kwargs)
-            relevant_doc_ids = summary_res["ids"][0] if summary_res["ids"] else []
+            # Union of both language variants' shortlists, order-preserving
+            seen_docs: set = set()
+            for id_list in (summary_res["ids"] or []):
+                for did in id_list:
+                    if did not in seen_docs:
+                        seen_docs.add(did)
+                        relevant_doc_ids.append(did)
         if allowed_ids is not None:
             # The summary shortlist isn't checkbox-aware — constrain it, and
             # never fall through to an unfiltered chunk search.
             relevant_doc_ids = [d for d in relevant_doc_ids if d in allowed_ids] \
                 or [d["id"] for d in session_docs]
-        kb_doc_ids = kb.search_summaries(search_query, top_k=5) if kb_enabled else []
+        kb_doc_ids = kb.search_summaries(queries, top_k=5) if kb_enabled else []
 
         # Layer 3 — Advanced: Semantic + BM25 + RRF, over both pools
         semantic_chunks = []
@@ -358,51 +480,69 @@ class UserRAGService:
                 filters.append({"doc_id": {"$in": relevant_doc_ids}})
             where_filter = filters[0] if len(filters) == 1 else ({"$and": filters} if filters else None)
 
-            kwargs = {"query_texts": [search_query], "n_results": min(20, len(session_chunks))}
+            kwargs = {"query_texts": queries, "n_results": min(20, len(session_chunks))}
             if where_filter:
                 kwargs["where"] = where_filter
             semantic_res = self._chunk_col.query(**kwargs)
 
-            if semantic_res["ids"] and semantic_res["ids"][0]:
-                for i, chunk_id in enumerate(semantic_res["ids"][0]):
-                    meta = semantic_res["metadatas"][0][i] if semantic_res["metadatas"] else {}
-                    dist = semantic_res["distances"][0][i] if semantic_res["distances"] else 1.0
-                    semantic_chunks.append({
+            # Both language variants search in one Chroma call; a chunk hit
+            # by both keeps its best score.
+            best: dict[str, dict] = {}
+            for qi in range(len(semantic_res["ids"] or [])):
+                for i, chunk_id in enumerate(semantic_res["ids"][qi]):
+                    meta = semantic_res["metadatas"][qi][i] if semantic_res["metadatas"] else {}
+                    dist = semantic_res["distances"][qi][i] if semantic_res["distances"] else 1.0
+                    score = round(1.0 - float(dist), 4)
+                    if chunk_id in best and best[chunk_id]["score"] >= score:
+                        continue
+                    best[chunk_id] = {
                         "id":     chunk_id,
-                        "text":   semantic_res["documents"][0][i],
+                        "text":   semantic_res["documents"][qi][i],
                         "title":  meta.get("title", ""),
                         "source": meta.get("source", ""),
                         "doc_id": meta.get("doc_id", ""),
                         "scope":  "session",
-                        "score":  round(1.0 - float(dist), 4),
+                        "score":  score,
                         **({"page": meta["page"]} if "page" in meta else {}),
-                    })
+                    }
+            semantic_chunks = list(best.values())
 
         # Both collections use the same embedding model and cosine space,
         # so their (1 - distance) scores are directly comparable.
-        kb_semantic = kb.search_semantic(search_query, n_results=20,
+        kb_semantic = kb.search_semantic(queries, n_results=20,
                                          doc_ids=kb_doc_ids or None) if kb_enabled else []
         semantic_chunks = sorted(semantic_chunks + kb_semantic,
                                  key=lambda c: c["score"], reverse=True)[:20]
 
         bm25_chunks = _merge_lexical(
-            self._bm25_search(search_query, n=20, session_id=session_id,
+            self._bm25_search(queries, n=20, session_id=session_id,
                               allowed_doc_ids=allowed_ids),
-            kb.search_bm25(search_query, n=20) if kb_enabled else [],
+            kb.search_bm25(queries, n=20) if kb_enabled else [],
         )
 
         from hybrid_rag import reciprocal_rank_fusion
-        top_k = 5 if complexity == "complex" else (4 if complexity == "medium" else 3)
+        # simple gets 4 (not 3): with competing near-answer chunks in the
+        # corpus, the correct one must survive into the generation context.
+        top_k = 5 if complexity == "complex" else 4
         fused = reciprocal_rank_fusion(semantic_chunks, bm25_chunks, top_k=top_k * 4)
         _reattach_chunk_fields(fused, bm25_chunks, semantic_chunks)
 
-        # Rerank if not simple
-        if complexity != "simple" and _reranker and len(fused) > 1:
-            pairs = [(search_query, c["text"]) for c in fused]
+        # Rerank ALWAYS (against the English-side query — the ms-marco
+        # CrossEncoder scores non-English pairs as noise). Skipping rerank
+        # for "simple" questions saved ~0.5s but let near-duplicate facts
+        # outrank the exact answer chunk — accuracy wins here.
+        # The CE ordering is BLENDED with the fusion ordering (RRF over both
+        # rank lists): when the corpus holds two competing near-answers, one
+        # CE miss must not evict the chunk BM25+semantic both agreed on.
+        if _reranker and len(fused) > 1:
+            pairs = [(q_en, c["text"]) for c in fused]
             scores = _reranker.predict(pairs)
-            for chunk, score in zip(fused, scores):
-                chunk["rerank_score"] = float(score)
-            fused.sort(key=lambda x: x.get("rerank_score", 0), reverse=True)
+            ce_rank = {i: r for r, i in enumerate(
+                sorted(range(len(fused)), key=lambda i: -float(scores[i])))}
+            for i, chunk in enumerate(fused):
+                chunk["rerank_score"] = float(scores[i])
+                chunk["blend"] = 1.0 / (10 + i) + 1.0 / (10 + ce_rank[i])
+            fused.sort(key=lambda c: c["blend"], reverse=True)
 
         top_chunks = fused[:top_k]
 
@@ -410,8 +550,8 @@ class UserRAGService:
         best_score = top_chunks[0].get("score", 1.0) if top_chunks else 0.0
         if best_score < 0.5:
             from query_expansion import generate_hypothetical_doc
-            hyde = generate_hypothetical_doc(search_query)
-            if hyde and hyde != search_query:
+            hyde = generate_hypothetical_doc(q_en)
+            if hyde and hyde != q_en:
                 hyde_chunks = []
                 if session_chunks:
                     hyde_filters = []
@@ -447,22 +587,11 @@ class UserRAGService:
         for i, c in enumerate(top_chunks, 1):
             c["rank"] = i
 
-        sources = [{
-            "rank":     c.get("rank", i + 1),
-            "title":    c.get("title", "Unknown"),
-            "snippet":  c.get("text", "")[:300],
-            "score":    _display_score(c),
-            "scope":    c.get("scope", "session"),  # "global" = shared KB
-            "doc_id":   c.get("doc_id", ""),
-            "chunk_id": c.get("id", ""),
-            **({"page": c["page"]} if c.get("page") else {}),
-        } for i, c in enumerate(top_chunks)]
-
         return {
             "empty":        False,
             "notice":       None,
             "top_chunks":   top_chunks,
-            "sources":      sources,
+            "sources":      _chunks_to_sources(top_chunks),
             "complexity":   complexity,
             "retrieval_ms": int((time.time() - t0) * 1000),
         }
@@ -519,7 +648,151 @@ class UserRAGService:
             if event.choices and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
 
+    # ── Multi-Hop (Layer 6) ────────────────────────────────
+
+    def has_any_source(self, session_id: str | None = None,
+                       include_doc_ids: list[str] | None = None,
+                       use_global_kb: bool = True) -> bool:
+        """Cheap check whether retrieval has anything to search."""
+        chunks = [c for c in self._chunks_store
+                  if not session_id or c.get("session_id") == session_id]
+        if include_doc_ids is not None:
+            allowed = set(include_doc_ids)
+            chunks = [c for c in chunks if c.get("doc_id") in allowed]
+        return bool(chunks) or (use_global_kb and not get_kb().is_empty())
+
+    def route_multihop(self, question: str) -> list[str]:
+        """Decide whether the question needs chained retrieval.
+
+        Returns ordered sub-queries (2-3) for multi-hop, or [] for the
+        normal single-retrieval path. Callers should only invoke this for
+        heuristically complex questions to keep simple lookups fast.
+        """
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            return []
+        try:
+            client = openai.OpenAI(api_key=self._api_key)
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user",
+                           "content": MULTIHOP_ROUTE_PROMPT.format(question=question)}],
+                temperature=0.0,
+                max_tokens=200,
+            )
+            raw = (res.choices[0].message.content or "").strip()
+        except Exception:
+            return []
+        if not raw or raw.upper().startswith("SINGLE"):
+            return []
+        subs = [line.strip().lstrip("0123456789.-) ").strip()
+                for line in raw.splitlines() if line.strip()]
+        subs = [s for s in subs if len(s) > 5]
+        # A single sub-question is just a rephrase — not worth the extra hops
+        return subs[:3] if len(subs) >= 2 else []
+
+    def _hop_answer(self, sub_question: str, chunks: list[dict]) -> str:
+        """Short bridging answer for one hop (feeds the next hop's query)."""
+        if not chunks:
+            return "NOT FOUND"
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            return chunks[0]["text"][:200]
+        context = "\n\n---\n\n".join(
+            f"[Nguồn {c.get('rank', i + 1)}: {c.get('title', '')}]\n{c['text']}"
+            for i, c in enumerate(chunks)
+        )
+        try:
+            client = openai.OpenAI(api_key=self._api_key)
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": MULTIHOP_HOP_PROMPT.format(
+                    context=context, sub_question=sub_question)}],
+                temperature=0.0,
+                max_tokens=150,
+            )
+            return (res.choices[0].message.content or "").strip() or "NOT FOUND"
+        except Exception:
+            return "NOT FOUND"
+
+    def multihop_events(self, question: str, sub_questions: list[str],
+                        history: list[dict] | None = None,
+                        session_id: str | None = None,
+                        include_doc_ids: list[str] | None = None,
+                        use_global_kb: bool = True):
+        """Chained-retrieval pipeline as an event generator.
+
+        Yields ("step", dict) for each reasoning step, then
+        ("sources", {"sources": [...]}) with the deduplicated union of all
+        hops' chunks, then ("delta", str) tokens of the final answer.
+        """
+        history = history or []
+        bridge: list[dict] = []
+        all_chunks: list[dict] = []
+
+        for i, sub_q in enumerate(sub_questions, 1):
+            # Facts found so far steer the next retrieval — this is the
+            # whole point of multi-hop: the bridging entity was never in
+            # the original question.
+            established = " | ".join(
+                f"[Đã biết: {b['answer']}]" for b in bridge
+                if b["answer"] and "NOT FOUND" not in b["answer"]
+            )
+            enriched = f"{sub_q} ({established})" if established else sub_q
+            yield ("step", {"stage": "hop_start", "hop": i,
+                            "total": len(sub_questions), "query": enriched})
+
+            ret = self.retrieve(enriched, [], session_id,
+                                include_doc_ids=include_doc_ids,
+                                use_global_kb=use_global_kb)
+            chunks = ret["top_chunks"] if not ret["empty"] else []
+            answer = self._hop_answer(sub_q, chunks)
+            all_chunks.extend(chunks)
+            bridge.append({"hop": i, "sub_question": sub_q, "answer": answer})
+            yield ("step", {"stage": "hop_done", "hop": i, "answer": answer,
+                            "titles": [c.get("title", "") for c in chunks[:3]]})
+
+        # Union of every hop's evidence, deduplicated, capped for context
+        seen: set = set()
+        unique: list[dict] = []
+        for c in all_chunks:
+            if c["id"] not in seen:
+                seen.add(c["id"])
+                unique.append(c)
+        unique = unique[:8]
+        for idx, c in enumerate(unique, 1):
+            c["rank"] = idx
+        yield ("sources", {"sources": _chunks_to_sources(unique)})
+
+        facts = "\n".join(f"- Bước {b['hop']}: {b['sub_question']} → {b['answer']}"
+                          for b in bridge)
+        synth_question = (
+            f"{question}\n\n"
+            f"(Các dữ kiện trung gian đã xác minh qua tìm kiếm nhiều bước — "
+            f"dùng chúng để trả lời, vẫn trích dẫn [n] theo Nguồn:\n{facts})"
+        )
+        for delta in self.generate_stream(synth_question, unique, history):
+            yield ("delta", delta)
+
     # ── Internals ──────────────────────────────────────────
+
+    def _translate_to_english(self, query: str) -> str:
+        """English version of a retrieval query (see TRANSLATE_QUERY_PROMPT).
+        Returns "" on any failure so callers fall back to the original."""
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            return ""
+        try:
+            client = openai.OpenAI(api_key=self._api_key)
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": TRANSLATE_QUERY_PROMPT},
+                    {"role": "user", "content": query},
+                ],
+                temperature=0.0,
+                max_tokens=150,
+            )
+            return (res.choices[0].message.content or "").strip().strip('"')
+        except Exception:
+            return ""
 
     def _condense_question(self, question: str, history: list[dict]) -> str:
         """Rewrite a follow-up question into a standalone retrieval query.
@@ -569,7 +842,8 @@ class UserRAGService:
                 messages.append({"role": m["role"], "content": str(m["content"])})
         messages.append({
             "role": "user",
-            "content": f"Ngữ cảnh:\n{context_str}\n\nCâu hỏi: {question}",
+            "content": (f"Ngữ cảnh:\n{context_str}\n\nCâu hỏi: {question}\n\n"
+                        f"{_lang_directive(question)}"),
         })
         return messages
 
@@ -589,19 +863,27 @@ class UserRAGService:
         )
         return response.choices[0].message.content.strip()
 
-    def _bm25_search(self, query: str, n: int = 20,
+    def _bm25_search(self, queries: str | list[str], n: int = 20,
                      session_id: str | None = None,
                      allowed_doc_ids: set[str] | None = None) -> list[dict]:
         # Score only within the session's chunks so IDF weights are not
         # skewed by documents from other conversations.
+        if isinstance(queries, str):
+            queries = [queries]
         pool = [c for c in self._chunks_store
                 if (not session_id or c.get("session_id") == session_id)
                 and (allowed_doc_ids is None or c.get("doc_id") in allowed_doc_ids)]
         if not pool:
             return []
         bm25 = BM25Okapi([_tokenize(c["text"]) for c in pool])
-        scores = bm25.get_scores(_tokenize(query))
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:n]
+        # Multi-language query variants: keep each chunk's best score
+        # (an EN translation is what actually matches an EN corpus).
+        merged = [0.0] * len(pool)
+        for q in queries:
+            for idx, score in enumerate(bm25.get_scores(_tokenize(q))):
+                if score > merged[idx]:
+                    merged[idx] = score
+        ranked = sorted(enumerate(merged), key=lambda x: x[1], reverse=True)[:n]
         return [{**pool[idx], "scope": "session", "score": round(float(score), 4)}
                 for idx, score in ranked if score > 0]
 
