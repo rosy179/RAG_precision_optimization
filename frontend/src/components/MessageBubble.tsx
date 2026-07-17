@@ -6,6 +6,7 @@ import {
   Image, Loader2, RefreshCw, ThumbsDown, ThumbsUp,
 } from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
+import { documentsAPI } from "../api/client";
 import type { MultihopStep } from "../api/client";
 
 export interface Source {
@@ -33,12 +34,23 @@ export interface Message {
   created_at?: string;
 }
 
+/** Session document a message attachment name resolves to. */
+export interface AttachmentDoc {
+  id: string;
+  name: string;
+  type: string;
+}
+
 interface Props {
   msg: Message;
   onFeedback?: (messageId: string, rating: "up" | "down" | null) => void;
   onRegenerate?: () => void;
   /** Open the document viewer at this source's location */
   onOpenSource?: (source: Source) => void;
+  /** Map an attachment name to its session document (id/type) */
+  resolveAttachment?: (name: string) => AttachmentDoc | undefined;
+  /** Open the document viewer for an attached document */
+  onOpenAttachment?: (doc: AttachmentDoc) => void;
 }
 
 const typeIcon = (title: string) => {
@@ -46,6 +58,100 @@ const typeIcon = (title: string) => {
   if (/\.(png|jpg|jpeg|webp)/i.test(title)) return <Image className="w-3.5 h-3.5" />;
   return <FileText className="w-3.5 h-3.5" />;
 };
+
+// Object URLs of fetched attachment images, kept for the app lifetime so
+// re-mounts (session switches) don't refetch the same bytes.
+const imageUrlCache = new Map<string, string>();
+
+/** Mini thumbnail of an attached image; click to zoom. Falls back to a name
+ *  chip for old uploads whose original file was never stored server-side. */
+function AttachmentImage({
+  docId, name, onZoom,
+}: { docId: string; name: string; onZoom: (url: string) => void }) {
+  const [url, setUrl] = useState<string | null>(imageUrlCache.get(docId) ?? null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (imageUrlCache.has(docId)) { setUrl(imageUrlCache.get(docId)!); return; }
+    let cancelled = false;
+    documentsAPI.fileBlob(docId)
+      .then((blob) => {
+        const u = URL.createObjectURL(blob);
+        imageUrlCache.set(docId, u);
+        if (!cancelled) setUrl(u);
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [docId]);
+
+  if (failed) {
+    return (
+      <span
+        className="flex items-center gap-1.5 text-xs rounded-xl px-2.5 py-1.5 shadow-sm max-w-[240px]"
+        style={{
+          background: "rgba(255,255,255,0.7)",
+          border: "1px solid rgba(124,58,237,0.2)",
+          backdropFilter: "blur(8px)",
+        }}
+      >
+        <span style={{ color: "#7C3AED" }} className="shrink-0"><Image className="w-3.5 h-3.5" /></span>
+        <span className="truncate text-[#1A1A2E]">{name}</span>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => url && onZoom(url)}
+      title={name}
+      className="rounded-xl overflow-hidden shadow-sm transition-transform hover:scale-[1.03]"
+      style={{
+        border: "1px solid rgba(124,58,237,0.25)",
+        cursor: url ? "zoom-in" : "default",
+        background: "rgba(255,255,255,0.6)",
+      }}
+    >
+      {url ? (
+        <img src={url} alt={name} className="h-24 max-w-[220px] object-cover block" />
+      ) : (
+        <span className="h-24 w-32 flex items-center justify-center">
+          <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** Fullscreen image preview, closed by click or Escape. */
+function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 60,
+        background: "rgba(15,10,30,0.75)",
+        backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        cursor: "zoom-out", animation: "fadeIn 0.15s ease",
+      }}
+    >
+      <img
+        src={url}
+        alt=""
+        style={{
+          maxWidth: "88vw", maxHeight: "88vh",
+          borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+      />
+    </div>
+  );
+}
 
 /** Turn bare [n] citation markers into markdown links (#cite-n) so the
  *  custom renderer below can style them as chips. Code spans/fences are
@@ -189,10 +295,13 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
   );
 }
 
-export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSource }: Props) {
+export default function MessageBubble({
+  msg, onFeedback, onRegenerate, onOpenSource, resolveAttachment, onOpenAttachment,
+}: Props) {
   const [showSources, setShowSources] = useState(false);
   const [highlightRank, setHighlightRank] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const highlightTimer = useRef<number>();
   const isUser = msg.role === "user";
 
@@ -201,25 +310,40 @@ export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSou
   if (isUser) {
     return (
       <div className="flex justify-end mb-4">
-        <div className="max-w-[72%] flex flex-col items-end gap-1.5">
+        <div className="max-w-[88%] md:max-w-[72%] flex flex-col items-end gap-1.5">
           {msg.attachments && msg.attachments.length > 0 && (
             <div className="flex flex-wrap justify-end gap-1.5">
-              {msg.attachments.map((name, i) => (
-                <span
-                  key={i}
-                  className="flex items-center gap-1.5 text-xs rounded-xl px-2.5 py-1.5 shadow-sm max-w-[240px]"
-                  style={{
-                    background: "rgba(255,255,255,0.7)",
-                    border: "1px solid rgba(124,58,237,0.2)",
-                    backdropFilter: "blur(8px)",
-                  }}
-                >
-                  <span style={{ color: "#7C3AED" }} className="shrink-0">{typeIcon(name)}</span>
-                  <span className="truncate text-[#1A1A2E]">{name}</span>
-                </span>
-              ))}
+              {msg.attachments.map((name, i) => {
+                const doc = resolveAttachment?.(name);
+                // Images render as mini thumbnails (click to zoom)
+                if (doc?.type === "image") {
+                  return <AttachmentImage key={i} docId={doc.id} name={name} onZoom={setLightboxUrl} />;
+                }
+                // Other docs: chip, clickable to open in the viewer when resolvable
+                const clickable = !!doc && !!onOpenAttachment;
+                return (
+                  <span
+                    key={i}
+                    role={clickable ? "button" : undefined}
+                    onClick={clickable ? () => onOpenAttachment!(doc!) : undefined}
+                    title={clickable ? "Mở tài liệu" : name}
+                    className={`flex items-center gap-1.5 text-xs rounded-xl px-2.5 py-1.5 shadow-sm max-w-[240px] transition-all ${
+                      clickable ? "cursor-pointer hover:shadow-md hover:-translate-y-px" : ""
+                    }`}
+                    style={{
+                      background: "rgba(255,255,255,0.7)",
+                      border: "1px solid rgba(124,58,237,0.2)",
+                      backdropFilter: "blur(8px)",
+                    }}
+                  >
+                    <span style={{ color: "#7C3AED" }} className="shrink-0">{typeIcon(name)}</span>
+                    <span className="truncate text-[#1A1A2E]">{name}</span>
+                  </span>
+                );
+              })}
             </div>
           )}
+          {lightboxUrl && <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
           <div
             className="rounded-3xl rounded-tr-md px-4 py-3 text-sm leading-relaxed shadow-sm"
             style={{
@@ -258,9 +382,9 @@ export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSou
   const rendered = linkifyCitations(msg.content, msg.sources?.length ?? 0);
 
   return (
-    <div className="flex items-start gap-3 mb-5">
-      {/* AI Avatar — mini robot */}
-      <div className="shrink-0" style={{ marginTop: 2 }}>
+    <div className="flex items-start gap-2 sm:gap-3 mb-5">
+      {/* AI Avatar — mini robot (ẩn trên điện thoại để rộng chỗ cho nội dung) */}
+      <div className="hidden sm:block shrink-0" style={{ marginTop: 2 }}>
         <AiRobotIcon mini />
       </div>
 
@@ -272,7 +396,7 @@ export default function MessageBubble({ msg, onFeedback, onRegenerate, onOpenSou
 
         {/* Answer card */}
         <div
-          className="rounded-3xl rounded-tl-md px-5 py-4 text-sm leading-relaxed"
+          className="rounded-3xl rounded-tl-md px-4 py-3 sm:px-5 sm:py-4 text-sm leading-relaxed"
           style={{
             background: "rgba(255,255,255,0.72)",
             backdropFilter: "blur(16px)",

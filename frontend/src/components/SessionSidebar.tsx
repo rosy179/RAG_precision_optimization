@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Trash2,
   Loader2,
@@ -26,6 +27,8 @@ interface Props {
   refreshKey: number;
   isOpen: boolean;
   onToggle: () => void;
+  /** Mobile: hiển thị dạng lớp phủ (drawer) thay vì chiếm chỗ layout */
+  overlay?: boolean;
   knowledgeActive: boolean;
   onOpenKnowledge: () => void;
   dashboardActive: boolean;
@@ -58,6 +61,7 @@ export default function SessionSidebar({
   refreshKey,
   isOpen,
   onToggle,
+  overlay = false,
   knowledgeActive,
   onOpenKnowledge,
   dashboardActive,
@@ -66,6 +70,7 @@ export default function SessionSidebar({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState<Session | null>(null);
 
   const timerRef = useRef<number | undefined>(undefined);
   const generationRef = useRef(0);
@@ -116,19 +121,32 @@ export default function SessionSidebar({
     return () => window.removeEventListener('click', onClick);
   }, [profileOpen]);
 
+  // Esc để đóng popup xác nhận xóa
+  useEffect(() => {
+    if (!confirmTarget) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmTarget(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmTarget]);
+
   const groups = groupByDate(sessions);
   const initial = user.name ? user.name[0].toUpperCase() : user.email[0].toUpperCase();
 
   return (
     <aside
-      className="sidebar-panel flex flex-col h-full shrink-0 text-[#1A1A2E]"
+      className={`sidebar-panel flex flex-col h-full shrink-0 text-[#1A1A2E] ${
+        overlay ? "fixed inset-y-0 left-0 z-50" : ""
+      }`}
       style={{
         width: isOpen ? 260 : 0,
         opacity: isOpen ? 1 : 0,
-        background: "rgba(255, 255, 255, 0.25)",
+        background: overlay ? "rgba(255, 255, 255, 0.92)" : "rgba(255, 255, 255, 0.25)",
         backdropFilter: "blur(16px)",
         WebkitBackdropFilter: "blur(16px)",
         borderRight: isOpen ? "1px solid rgba(255, 255, 255, 0.4)" : "none",
+        boxShadow: overlay && isOpen ? "8px 0 32px rgba(26,26,46,0.18)" : "none",
         overflow: "hidden",
         transition: "width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease",
       }}
@@ -215,8 +233,9 @@ export default function SessionSidebar({
                   >
                     <span className="truncate pr-2">{s.title}</span>
                     <button
-                      onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 rounded-md hover:bg-black/5 transition-all shrink-0"
+                      onClick={(e) => { e.stopPropagation(); setConfirmTarget(s); }}
+                      title="Xóa cuộc hội thoại"
+                      className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 rounded-md hover:bg-black/5 transition-all shrink-0"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -271,6 +290,59 @@ export default function SessionSidebar({
         </div>
 
       </div>
+
+      {/* Popup xác nhận xóa — portal ra body để không bị sidebar (overflow/backdrop-filter) cắt mất */}
+      {confirmTarget &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+            style={{ background: "rgba(26, 26, 46, 0.45)" }}
+            onClick={() => setConfirmTarget(null)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-session-title"
+              className="w-full max-w-sm rounded-2xl bg-white shadow-2xl p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-red-50">
+                  <Trash2 className="w-5 h-5 text-red-500" />
+                </div>
+                <div className="min-w-0">
+                  <p id="delete-session-title" className="font-semibold text-[15px] text-gray-900">
+                    Xóa cuộc hội thoại?
+                  </p>
+                  <p className="text-sm text-gray-500 mt-1">
+                    "<span className="font-medium text-gray-700">{confirmTarget.title}</span>" sẽ bị
+                    xóa vĩnh viễn và không thể hoàn tác.
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 mt-5">
+                <button
+                  onClick={() => setConfirmTarget(null)}
+                  autoFocus
+                  className="px-4 py-2 rounded-xl text-sm font-medium text-gray-600 hover:bg-black/5 transition-colors"
+                >
+                  Hủy
+                </button>
+                <button
+                  onClick={() => {
+                    onDelete(confirmTarget.id);
+                    setConfirmTarget(null);
+                  }}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                  style={{ background: "#EF4444" }}
+                >
+                  Xóa
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </aside>
   );
 }

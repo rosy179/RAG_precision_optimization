@@ -28,7 +28,7 @@ export default function AuthPage({ onAuth }: Props) {
 
   return (
     <div
-      className="flex h-screen w-screen items-center justify-center relative overflow-hidden"
+      className="flex h-dvh w-full items-center justify-center relative overflow-hidden"
       style={{
         background: "linear-gradient(135deg, #A8C8FF 0%, #FFD1ED 50%, #E0C3FC 100%)",
       }}
@@ -39,7 +39,7 @@ export default function AuthPage({ onAuth }: Props) {
 
       {/* Main Container */}
       <div
-        className="w-[92%] max-w-5xl h-[85vh] max-h-[750px] rounded-[40px] relative overflow-hidden flex shadow-2xl"
+        className="w-[94%] max-w-5xl max-h-[94dvh] md:h-[85vh] md:max-h-[750px] rounded-[28px] md:rounded-[40px] relative overflow-hidden flex shadow-2xl"
         style={{
           background: "rgba(255, 255, 255, 0.8)",
           backdropFilter: "blur(24px)",
@@ -47,8 +47,8 @@ export default function AuthPage({ onAuth }: Props) {
           border: "1px solid rgba(255,255,255,0.9)",
         }}
       >
-        {/* Top-left: Website description and AI Agent name */}
-        <div className="absolute top-10 left-10 z-30">
+        {/* Top-left: Website description and AI Agent name (desktop only) */}
+        <div className="hidden md:block absolute top-10 left-10 z-30">
           <h1 className="text-2xl font-bold text-[#1A1A2E] tracking-tight">AI Agent</h1>
           <p className="text-sm mt-1 font-medium" style={{ color: "#7C3AED" }}>IT Knowledge Assistant • RAG-powered</p>
         </div>
@@ -86,10 +86,19 @@ export default function AuthPage({ onAuth }: Props) {
         </div>
 
         {/* Right side: Login Form */}
-        <div className="w-full md:w-1/2 flex flex-col justify-center items-center p-8 z-20 bg-white/30 backdrop-blur-sm">
-          <div className="w-full max-w-sm">
-            
-            <div className="text-center mb-10">
+        <div className="w-full md:w-1/2 flex flex-col justify-center items-center p-6 sm:p-8 z-20 bg-white/30 backdrop-blur-sm overflow-y-auto">
+          <div className="w-full max-w-sm py-6 md:py-0">
+
+            {/* Mobile: brand hiển thị phía trên form thay cho logo góc trái */}
+            <div className="md:hidden text-center mb-8">
+              <div className="flex justify-center mb-3">
+                <AiRobotIcon size={90} />
+              </div>
+              <h1 className="text-2xl font-bold text-[#1A1A2E] tracking-tight">AI Agent</h1>
+              <p className="text-xs mt-1 font-medium" style={{ color: "#7C3AED" }}>IT Knowledge Assistant • RAG-powered</p>
+            </div>
+
+            <div className="text-center mb-6 md:mb-10">
               <h2 className="text-3xl font-semibold text-[#374151] mb-2" style={{ fontFamily: "Inter, sans-serif" }}>
                 {tab === "login" ? "Log in" : "Sign up"}
               </h2>
