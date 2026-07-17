@@ -15,14 +15,25 @@ from backend.services.user_rag import get_service, openai_error_detail
 
 router = APIRouter()
 
-# Original PDFs are kept on disk so the viewer can render the real document
-# (text/URL/image/audio docs are reconstructed from chunks instead).
+# Original PDFs and images are kept on disk so the viewer can render the real
+# document and the chat can show thumbnails (text/URL/audio docs are
+# reconstructed from chunks instead).
 UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp",
+}
 
 
 def _pdf_path(doc_id: str) -> Path:
     return UPLOAD_DIR / f"{doc_id}.pdf"
+
+
+def _stored_file(doc_id: str) -> Optional[Path]:
+    """Original uploaded bytes, whatever the extension (doc_id is a uuid)."""
+    return next(UPLOAD_DIR.glob(f"{doc_id}.*"), None)
 
 
 @router.post("/upload")
@@ -69,6 +80,8 @@ async def upload_file(
 
         if doc_type == "pdf":
             _pdf_path(doc_id).write_bytes(file_bytes)
+        elif doc_type == "image":
+            (UPLOAD_DIR / f"{doc_id}{ext}").write_bytes(file_bytes)
 
         doc = Document(id=doc_id, user_id=current_user.id, session_id=session_id,
                        name=filename, doc_type=doc_type, chunk_count=chunk_count)
@@ -156,14 +169,16 @@ def get_document_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Original PDF bytes for the react-pdf viewer."""
+    """Original file bytes: PDFs for the react-pdf viewer, images for chat thumbnails."""
     doc = db.query(Document).filter(Document.id == doc_id, Document.user_id == current_user.id).first()
     if not doc:
         raise HTTPException(404, "Document not found")
-    path = _pdf_path(doc_id)
-    if doc.doc_type != "pdf" or not path.exists():
+    path = _stored_file(doc_id)
+    if path is None:
         raise HTTPException(404, "No original file stored for this document")
-    return FileResponse(path, media_type="application/pdf", filename=doc.name)
+    suffix = path.suffix.lower()
+    media = "application/pdf" if suffix == ".pdf" else _IMAGE_MEDIA_TYPES.get(suffix, "application/octet-stream")
+    return FileResponse(path, media_type=media, filename=doc.name)
 
 
 @router.delete("/{doc_id}")
@@ -177,7 +192,8 @@ def delete_document(
         raise HTTPException(404, "Document not found")
     rag = get_service(current_user.id)
     rag.remove_document(doc_id)
-    _pdf_path(doc_id).unlink(missing_ok=True)
+    for p in UPLOAD_DIR.glob(f"{doc_id}.*"):
+        p.unlink(missing_ok=True)
     db.delete(doc)
     db.commit()
     return {"success": True}

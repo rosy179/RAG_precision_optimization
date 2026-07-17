@@ -112,6 +112,68 @@ Bạn nhận lịch sử hội thoại và một câu hỏi mới. Viết lại 
 - Nếu câu hỏi mới đã độc lập và rõ ràng, trả lại nguyên văn.
 Chỉ trả về câu truy vấn, không giải thích gì thêm."""
 
+# "Summarize this link/document"-type questions carry no topical signal —
+# similarity search returns noise for them (often unrelated global-KB chunks).
+# They are detected here and served by reading the target document directly.
+_SUMMARY_INTENT_RE = re.compile(
+    r"tóm\s*tắt|tóm\s*lược|nội\s*dung\s*(chính|của|có|trong|ở)|ý\s*chính|"
+    r"điểm\s*chính|nói\s*(về\s*)?(gì|cái\s*gì|điều\s*gì)|viết\s*về\s*gì|"
+    r"đề\s*cập\s*(đến|tới)?\s*gì|giới\s*thiệu\s*gì|"
+    r"summar(y|ize|ise)|tl;?dr|main\s+(points?|ideas?|content)|"
+    r"key\s+(points?|takeaways?)|what\s+is\s+(it|this|the\s+\w+)\s+about|"
+    r"\boverview\b|\bgist\b", re.IGNORECASE)
+
+# Mentions of an attached-document object ("đường link", "bài viết", "file"…)
+# used to pick a digest target when the message has no attachment of its own.
+_DOC_REF_RE = re.compile(
+    r"https?://|đường\s*link|\blink\b|\burl\b|bài\s*(viết|báo|blog)|"
+    r"trang\s*web|tài\s*liệu|văn\s*bản|tệp|\bfile\b|\bpdf\b|hình\s*ảnh|"
+    r"bản\s*ghi\s*âm|article|\bpage\b|document|\bblog\b|\bpost\b|website|"
+    r"recording|image|picture", re.IGNORECASE)
+
+
+def is_summary_question(question: str) -> bool:
+    """True for topically-empty summarize/what-is-it-about questions."""
+    return bool(_SUMMARY_INTENT_RE.search(question))
+
+
+# "Dịch bản tóm tắt đó sang tiếng Nhật"-type requests transform the PREVIOUS
+# answer — retrieval has nothing to add and its strict grounded-only prompt
+# makes the model refuse. They are served by a dedicated transform path.
+_LANG_PHRASE_RE = re.compile(
+    r"(sang|ra|qua|bằng|thành)\s+tiếng\s+\w+|\btranslate\b|"
+    r"\b(in|into|to)\s+(japanese|english|vietnamese|chinese|korean|french|german|spanish)\b|"
+    r"日本語|英語|ベトナム語", re.IGNORECASE)
+# Starts as an imperative transform command…
+_TRANSFORM_CMD_RE = re.compile(
+    r"^\s*(hãy|vui\s*lòng|làm\s*ơn|please)?\s*(dịch|chuyển|translate|viết\s*lại|đổi)\b",
+    re.IGNORECASE)
+# …or explicitly points back at the previous output
+_PREV_OUTPUT_RE = re.compile(
+    r"(bản|câu|phần|nội\s*dung|đoạn)\s*(tóm\s*tắt|trả\s*lời|tổng\s*hợp|dịch)?\s*"
+    r"(đó|này|trên|vừa\s*rồi|ở\s*trên)|câu\s*trả\s*lời|"
+    r"the\s+(answer|summary|response)|\babove\b", re.IGNORECASE)
+
+
+def wants_prev_transform(question: str, history: list[dict] | None) -> bool:
+    """True when the question asks to re-render the previous answer in
+    another language/format rather than asking something new."""
+    prev = next((m for m in reversed(history or [])
+                 if m.get("role") == "assistant" and m.get("content")), None)
+    if prev is None or not _LANG_PHRASE_RE.search(question):
+        return False
+    return bool(_TRANSFORM_CMD_RE.match(question) or _PREV_OUTPUT_RE.search(question))
+
+
+TRANSFORM_SYSTEM_PROMPT = """\
+Bạn nhận "Câu trả lời trước" của trợ lý và một yêu cầu trình bày lại nó \
+(dịch sang ngôn ngữ khác, rút gọn, đổi định dạng...).
+- Thực hiện đúng yêu cầu trên TOÀN BỘ câu trả lời trước, không bỏ sót ý.
+- Giữ nguyên cấu trúc Markdown (tiêu đề, gạch đầu dòng, bảng), số liệu và các chỉ số trích dẫn [1], [2]...
+- Khi dịch: giữ nguyên tên riêng, tên sản phẩm và thuật ngữ kỹ thuật thông dụng; phần còn lại dịch tự nhiên, trôi chảy.
+- Chỉ trả về kết quả, không thêm lời giải thích hay lời dẫn."""
+
+
 # Shared reranker (loaded once at startup)
 _reranker: Optional[CrossEncoder] = None
 # Per-user RAG service instances
@@ -122,10 +184,15 @@ def warm_up():
     global _reranker
     print("[RAG] Loading CrossEncoder reranker...")
     try:
-        _reranker = CrossEncoder(RERANKER)
-        print("[RAG] Reranker ready.")
-    except Exception as e:
-        print(f"[RAG] Reranker load failed: {e}")
+        # Local cache first — HF Hub outages must not block startup.
+        _reranker = CrossEncoder(RERANKER, local_files_only=True)
+        print("[RAG] Reranker ready (local cache).")
+    except Exception:
+        try:
+            _reranker = CrossEncoder(RERANKER)
+            print("[RAG] Reranker ready.")
+        except Exception as e:
+            print(f"[RAG] Reranker load failed: {e}")
 
 
 def get_service(user_id: str) -> "UserRAGService":
@@ -381,7 +448,9 @@ class UserRAGService:
     def retrieve(self, question: str, history: list[dict] | None = None,
                  session_id: str | None = None,
                  include_doc_ids: list[str] | None = None,
-                 use_global_kb: bool = True) -> dict:
+                 use_global_kb: bool = True,
+                 attached_doc_ids: list[str] | None = None,
+                 digest_ok: bool = True) -> dict:
         """Run the full retrieval stack (Layers 1-4) without generation.
 
         Returns top_chunks + UI-ready sources so callers can either generate
@@ -390,6 +459,11 @@ class UserRAGService:
         include_doc_ids: session doc ids the user checked in the source
         picker (None = all session docs). use_global_kb=False excludes the
         shared KB for this question.
+
+        attached_doc_ids: docs attached to THIS message — they are the
+        question's most likely subject, so they lead the doc shortlist and
+        anchor the summarize digest path. digest_ok=False disables that path
+        (multi-hop sub-queries must always run real retrieval).
         """
         # Retrieval draws from two pools: chunks uploaded in THIS session
         # (per-conversation scope, as before) plus the shared global
@@ -422,6 +496,19 @@ class UserRAGService:
         history = history or []
         session_filter = {"session_id": session_id} if session_id else None
 
+        allowed_ids = set(include_doc_ids) if include_doc_ids is not None else None
+        session_docs = [d for d in self._doc_registry
+                        if (not session_id or d.get("session_id") == session_id)
+                        and (allowed_ids is None or d["id"] in allowed_ids)]
+
+        # Summarize-type questions targeting an attached/referenced document
+        # skip search entirely and read that document's chunks in order.
+        if digest_ok:
+            digest = self._digest_retrieve(question, session_docs, attached_doc_ids)
+            if digest is not None:
+                digest["retrieval_ms"] = int((time.time() - t0) * 1000)
+                return digest
+
         # Follow-ups ("dịch sang tiếng Nhật", "nói rõ hơn") carry no retrieval
         # signal on their own — condense with history into a standalone query.
         # Generation still sees the original question + history.
@@ -445,10 +532,6 @@ class UserRAGService:
         # Layer 2 — Hierarchical: find relevant docs by summary, separately
         # per pool (session docs and global KB docs live in different
         # collections, so each needs its own doc-id shortlist).
-        allowed_ids = set(include_doc_ids) if include_doc_ids is not None else None
-        session_docs = [d for d in self._doc_registry
-                        if (not session_id or d.get("session_id") == session_id)
-                        and (allowed_ids is None or d["id"] in allowed_ids)]
         top_k_docs = min(5, len(session_docs))
         relevant_doc_ids: list[str] = []
         if top_k_docs > 0:
@@ -468,6 +551,12 @@ class UserRAGService:
             # never fall through to an unfiltered chunk search.
             relevant_doc_ids = [d for d in relevant_doc_ids if d in allowed_ids] \
                 or [d["id"] for d in session_docs]
+        if attached_doc_ids:
+            # Docs attached to this message are its most likely subject —
+            # guarantee them a spot in the chunk-search shortlist.
+            valid = {d["id"] for d in session_docs}
+            boost = [i for i in attached_doc_ids if i in valid]
+            relevant_doc_ids = list(dict.fromkeys(boost + relevant_doc_ids))
         kb_doc_ids = kb.search_summaries(queries, top_k=5) if kb_enabled else []
 
         # Layer 3 — Advanced: Semantic + BM25 + RRF, over both pools
@@ -599,12 +688,23 @@ class UserRAGService:
     def query(self, question: str, history: list[dict] | None = None,
               session_id: str | None = None,
               include_doc_ids: list[str] | None = None,
-              use_global_kb: bool = True) -> dict:
+              use_global_kb: bool = True,
+              attached_doc_ids: list[str] | None = None) -> dict:
         t0 = time.time()
         history = history or []
+
+        if wants_prev_transform(question, history):
+            prev = next(str(m["content"]) for m in reversed(history)
+                        if m.get("role") == "assistant" and m.get("content"))
+            answer = "".join(self.transform_stream(question, prev))
+            return {"answer": answer, "sources": [], "reasoning": "",
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "from_cache": False, "complexity": "transform"}
+
         ret = self.retrieve(question, history, session_id,
                             include_doc_ids=include_doc_ids,
-                            use_global_kb=use_global_kb)
+                            use_global_kb=use_global_kb,
+                            attached_doc_ids=attached_doc_ids)
         if ret["empty"]:
             return {"answer": ret["notice"], "sources": [], "reasoning": "",
                     "latency_ms": 0, "from_cache": False, "complexity": "simple"}
@@ -642,6 +742,31 @@ class UserRAGService:
             messages=self._chat_messages(question, chunks, history or []),
             temperature=0.2,
             max_tokens=1500,
+            stream=True,
+        )
+        for event in stream:
+            if event.choices and event.choices[0].delta.content:
+                yield event.choices[0].delta.content
+
+    def transform_stream(self, question: str, prev_answer: str):
+        """Yield the previous answer re-rendered per the user's instruction
+        (translate, shorten, reformat) — no retrieval involved."""
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            mock = f"[MOCK TRANSFORM] {question}: {prev_answer[:200]}"
+            for i in range(0, len(mock), 24):
+                yield mock[i:i + 24]
+            return
+
+        client = openai.OpenAI(api_key=self._api_key)
+        stream = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": TRANSFORM_SYSTEM_PROMPT},
+                {"role": "user", "content":
+                    f"Câu trả lời trước:\n{prev_answer}\n\nYêu cầu: {question}"},
+            ],
+            temperature=0.2,
+            max_tokens=2000,
             stream=True,
         )
         for event in stream:
@@ -717,7 +842,8 @@ class UserRAGService:
                         history: list[dict] | None = None,
                         session_id: str | None = None,
                         include_doc_ids: list[str] | None = None,
-                        use_global_kb: bool = True):
+                        use_global_kb: bool = True,
+                        attached_doc_ids: list[str] | None = None):
         """Chained-retrieval pipeline as an event generator.
 
         Yields ("step", dict) for each reasoning step, then
@@ -742,7 +868,9 @@ class UserRAGService:
 
             ret = self.retrieve(enriched, [], session_id,
                                 include_doc_ids=include_doc_ids,
-                                use_global_kb=use_global_kb)
+                                use_global_kb=use_global_kb,
+                                attached_doc_ids=attached_doc_ids,
+                                digest_ok=False)
             chunks = ret["top_chunks"] if not ret["empty"] else []
             answer = self._hop_answer(sub_q, chunks)
             all_chunks.extend(chunks)
@@ -773,6 +901,67 @@ class UserRAGService:
             yield ("delta", delta)
 
     # ── Internals ──────────────────────────────────────────
+
+    def _digest_retrieve(self, question: str, session_docs: list[dict],
+                         attached_doc_ids: list[str] | None) -> dict | None:
+        """Direct-read path for "tóm tắt link này"-type questions.
+
+        Such questions are topically empty, so similarity search returns
+        noise. When the target document is identifiable — attached to this
+        message, named in the question, or referenced deictically ("đường
+        link đó") — answer from its chunks in document order instead.
+        Returns None when this path does not apply.
+        """
+        if not session_docs or not _SUMMARY_INTENT_RE.search(question):
+            return None
+
+        targets: list[str] = []
+        if attached_doc_ids:
+            valid = {d["id"] for d in session_docs}
+            targets = [i for i in attached_doc_ids if i in valid]
+        if not targets:
+            q = question.lower()
+            # Doc named in the question ("tóm tắt file report.pdf")
+            targets = [d["id"] for d in session_docs
+                       if len(d["name"]) > 4
+                       and d["name"].lower().rsplit(".", 1)[0] in q][:2]
+        if not targets and _DOC_REF_RE.search(question):
+            # "đường link đó" / "bài viết này" — most recently added doc
+            targets = [session_docs[-1]["id"]]
+        if not targets:
+            return None
+
+        chunks = self._ordered_doc_chunks(targets)
+        if not chunks:
+            return None
+        for i, c in enumerate(chunks, 1):
+            c["rank"] = i
+        return {
+            "empty":      False,
+            "notice":     None,
+            "top_chunks": chunks,
+            "sources":    _chunks_to_sources(chunks),
+            "complexity": "simple",
+        }
+
+    def _ordered_doc_chunks(self, doc_ids: list[str], cap: int = 8) -> list[dict]:
+        """A document's chunks in reading order, evenly sampled down to
+        `cap` (first and last always kept) so long docs still fit the
+        generation context."""
+        def chunk_index(c: dict) -> int:
+            m = re.search(r"_c(\d+)$", c["id"])
+            return int(m.group(1)) if m else 0
+
+        out: list[dict] = []
+        for did in doc_ids:
+            rows = sorted((c for c in self._chunks_store if c.get("doc_id") == did),
+                          key=chunk_index)
+            out.extend(rows)
+        if len(out) > cap:
+            picks = sorted({round(j * (len(out) - 1) / (cap - 1)) for j in range(cap)})
+            out = [out[i] for i in picks]
+        # score 1.0: chunks are read from the requested doc, not ranked guesses
+        return [{**c, "scope": "session", "score": 1.0} for c in out]
 
     def _translate_to_english(self, query: str) -> str:
         """English version of a retrieval query (see TRANSLATE_QUERY_PROMPT).

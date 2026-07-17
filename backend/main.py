@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from backend.database import create_tables
 from backend.api.auth import router as auth_router
@@ -40,3 +43,17 @@ app.include_router(docs_router, prefix="/api/documents", tags=["documents"])
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["knowledge"])
 app.include_router(monitoring_router, prefix="/api/monitoring", tags=["monitoring"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])
+
+# ── Serve the built frontend (single-origin deploys: Cloudflare Tunnel, VPS) ──
+# API routes above win; anything else falls through to the SPA. In dev the
+# Vite server (5173) is used instead and this block is inert if dist/ is absent.
+FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+if FRONTEND_DIST.exists():
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str):
+        candidate = (FRONTEND_DIST / full_path).resolve()
+        # Path-traversal guard: only serve files inside dist/
+        if candidate.is_file() and candidate.is_relative_to(FRONTEND_DIST.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")

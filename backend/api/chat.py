@@ -12,7 +12,10 @@ from backend.database import (
     get_db, ChatSession, Document, Message, QueryLog, SessionLocal, User,
 )
 from backend.api.auth import get_current_user
-from backend.services.user_rag import get_service, generate_session_title, openai_error_detail
+from backend.services.user_rag import (
+    get_service, generate_session_title, is_summary_question, openai_error_detail,
+    wants_prev_transform,
+)
 
 router = APIRouter()
 
@@ -65,6 +68,20 @@ class FeedbackRequest(BaseModel):
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _attached_doc_ids(db: Session, user_id: str, session_id: str,
+                      names: list[str]) -> list[str] | None:
+    """Resolve attachment names sent with the message to session doc ids so
+    retrieval can treat them as the question's subject."""
+    if not names:
+        return None
+    rows = db.query(Document).filter(
+        Document.user_id == user_id,
+        Document.session_id == session_id,
+        Document.name.in_(names),
+    ).all()
+    return [d.id for d in rows] or None
 
 
 @router.post("/sessions")
@@ -133,10 +150,12 @@ def chat(
         raise HTTPException(404, "Session not found")
 
     rag = get_service(current_user.id)
+    attached_ids = _attached_doc_ids(db, current_user.id, session_id, req.attachments)
     try:
         result = rag.query(req.question, req.history, session_id=session_id,
                            include_doc_ids=req.include_doc_ids,
-                           use_global_kb=req.use_global_kb)
+                           use_global_kb=req.use_global_kb,
+                           attached_doc_ids=attached_ids)
     except openai.APIError as e:
         raise HTTPException(502, openai_error_detail(e)) from e
 
@@ -198,6 +217,9 @@ def chat_stream(
             raise HTTPException(404, "Message to regenerate not found")
 
     rag = get_service(current_user.id)
+    # Resolve before streaming starts — the request-scoped db session may be
+    # torn down once the generator is running.
+    attached_ids = _attached_doc_ids(db, current_user.id, session_id, req.attachments)
 
     def persist(db2: Session, answer: str, sources: list[dict],
                 steps: list[dict] | None = None) -> dict:
@@ -256,6 +278,38 @@ def chat_stream(
                        len(sources), status)
 
         try:
+            if wants_prev_transform(req.question, req.history):
+                # "Dịch bản tóm tắt đó sang tiếng Nhật"-type requests re-render
+                # the PREVIOUS answer. Retrieval can't help (no chunk contains
+                # the answer) and its grounded-only prompt makes the model
+                # refuse — transform directly, carrying the citations over.
+                complexity = "transform"
+                prev = next(str(m["content"]) for m in reversed(req.history)
+                            if m.get("role") == "assistant" and m.get("content"))
+                prev_msg = (db2.query(Message)
+                            .filter(Message.session_id == session_id,
+                                    Message.role == "assistant")
+                            .order_by(Message.created_at.desc())
+                            .first())
+                sources = json.loads(prev_msg.sources_json or "[]") if prev_msg else []
+                yield _sse("meta", {"sources": sources, "complexity": complexity})
+                try:
+                    for delta in rag.transform_stream(req.question, prev):
+                        parts.append(delta)
+                        yield _sse("delta", {"text": delta})
+                except openai.APIError as e:
+                    yield _sse("error", {"detail": openai_error_detail(e)})
+                    if not parts:
+                        log("error")
+                        return
+                ids = persist(db2, "".join(parts).strip(), sources, steps)
+                log("success")
+                yield _sse("done", {
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    **ids,
+                })
+                return
+
             # Layer 1 — Adaptive router: medium/complex questions get one
             # extra LLM call deciding whether they need chained retrieval
             # (bridging entity discovered in hop 1 feeds hop 2's query).
@@ -266,8 +320,12 @@ def chat_stream(
             from adaptive_rag import classify_heuristic
             complexity = classify_heuristic(req.question)
             sub_questions: list[str] = []
-            if complexity in ("medium", "complex") and rag.has_any_source(
-                    session_id, req.include_doc_ids, req.use_global_kb):
+            # Summarize-type questions never need chained retrieval — they
+            # go straight to the document digest path inside retrieve().
+            if (complexity in ("medium", "complex")
+                    and not is_summary_question(req.question)
+                    and rag.has_any_source(
+                        session_id, req.include_doc_ids, req.use_global_kb)):
                 sub_questions = rag.route_multihop(req.question)
 
             if sub_questions:
@@ -280,7 +338,8 @@ def chat_stream(
                             req.question, sub_questions, req.history,
                             session_id=session_id,
                             include_doc_ids=req.include_doc_ids,
-                            use_global_kb=req.use_global_kb):
+                            use_global_kb=req.use_global_kb,
+                            attached_doc_ids=attached_ids):
                         if kind == "step":
                             steps.append(payload)
                             yield _sse("step", payload)
@@ -301,7 +360,8 @@ def chat_stream(
                 try:
                     ret = rag.retrieve(req.question, req.history, session_id=session_id,
                                        include_doc_ids=req.include_doc_ids,
-                                       use_global_kb=req.use_global_kb)
+                                       use_global_kb=req.use_global_kb,
+                                       attached_doc_ids=attached_ids)
                 except openai.APIError as e:
                     yield _sse("error", {"detail": openai_error_detail(e)})
                     log("error")
