@@ -25,8 +25,28 @@
     -webkit-font-smoothing: antialiased;
     background: linear-gradient(135deg, #EDE9FF 0%, #E0EEFF 50%, #D9F0FF 100%);
     overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
   }
   #root { display: flex; }
+}
+
+/* ─── Mobile fixes ───────────────────────────────────────── */
+/* Trình duyệt cũ không hiểu dvh → dùng vh thay thế */
+@supports not (height: 100dvh) {
+  .h-dvh { height: 100vh; }
+  .max-h-\[94dvh\] { max-height: 94vh; }
+}
+
+/* iOS Safari tự zoom khi focus input có font-size < 16px */
+@media (max-width: 767px) {
+  input, textarea, select { font-size: 16px !important; }
+}
+
+/* Bảng markdown trong câu trả lời: cuộn ngang thay vì tràn màn hình */
+.prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* ─── Glass utility ──────────────────────────────────────── */

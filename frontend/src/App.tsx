@@ -1,22 +1,37 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { PanelLeftOpen } from "lucide-react";
 import { useAuth } from "./hooks/useAuth";
+import { useIsMobile } from "./hooks/useIsMobile";
 import AuthPage from "./pages/AuthPage";
 import ChatPage from "./pages/ChatPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import DashboardPage from "./pages/DashboardPage";
 import SessionSidebar from "./components/SessionSidebar";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { sessionsAPI } from "./api/client";
 
 export default function App() {
   const { user, login, register, logout } = useAuth();
+  const isMobile = useIsMobile();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarKey, setSidebarKey] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => window.matchMedia("(min-width: 768px)").matches
+  );
   const [view, setView] = useState<"chat" | "knowledge" | "dashboard">("chat");
+
+  // Đổi hướng / đổi cỡ màn hình: mobile mặc định đóng, desktop mặc định mở
+  useEffect(() => {
+    setSidebarOpen(!isMobile);
+  }, [isMobile]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen((prev) => !prev);
+  }, []);
+
+  // Trên mobile sidebar là lớp phủ — chọn xong thì tự đóng
+  const closeSidebarOnMobile = useCallback(() => {
+    if (window.matchMedia("(max-width: 767px)").matches) setSidebarOpen(false);
   }, []);
 
   const handleAuth = useCallback(async (
@@ -29,12 +44,14 @@ export default function App() {
   const handleNewChat = useCallback(async () => {
     setActiveSessionId(null);
     setView("chat");
-  }, []);
+    closeSidebarOnMobile();
+  }, [closeSidebarOnMobile]);
 
   const handleSelectSession = useCallback((id: string) => {
     setActiveSessionId(id);
     setView("chat");
-  }, []);
+    closeSidebarOnMobile();
+  }, [closeSidebarOnMobile]);
 
   const handleDeleteSession = useCallback(async (id: string) => {
     await sessionsAPI.delete(id).catch(() => {});
@@ -52,18 +69,27 @@ export default function App() {
   }
 
   return (
-    <div className="relative flex h-screen w-screen overflow-hidden bg-[#F4F7FE]">
+    <div className="relative flex h-dvh w-full overflow-hidden bg-[#F4F7FE]">
       {/* Abstract Background Blobs */}
       <div className="absolute top-[-10%] left-[-10%] w-[45%] h-[45%] rounded-full filter blur-[100px] opacity-80" style={{ background: "linear-gradient(135deg, #A8C8FF, #D9E4FF)" }} />
       <div className="absolute top-[5%] right-[-5%] w-[50%] h-[50%] rounded-full filter blur-[120px] opacity-70" style={{ background: "linear-gradient(135deg, #FFD1ED, #FFE4F4)" }} />
       <div className="absolute bottom-[-10%] left-[15%] w-[60%] h-[60%] rounded-full filter blur-[130px] opacity-70" style={{ background: "linear-gradient(135deg, #E0C3FC, #8EC5FC)" }} />
-      
-      {/* Decorative top-left ring */}
-      <div className="absolute top-10 left-10 w-[60px] h-[60px] rounded-full border-[5px] border-white/90 flex items-center justify-center z-0 backdrop-blur-sm pointer-events-none" style={{ boxShadow: '0 0 25px rgba(255,255,255,1), inset 0 0 15px rgba(255,255,255,0.8)' }}>
+
+      {/* Decorative top-left ring (desktop only) */}
+      <div className="hidden md:flex absolute top-10 left-10 w-[60px] h-[60px] rounded-full border-[5px] border-white/90 items-center justify-center z-0 backdrop-blur-sm pointer-events-none" style={{ boxShadow: '0 0 25px rgba(255,255,255,1), inset 0 0 15px rgba(255,255,255,0.8)' }}>
         <div className="w-2.5 h-2.5 rounded-full bg-white shadow-[0_0_8px_white] absolute top-2 left-2" />
       </div>
 
       <div className="flex h-full w-full z-10 relative">
+        {/* Mobile: backdrop đóng sidebar khi chạm ra ngoài */}
+        {isMobile && sidebarOpen && (
+          <div
+            onClick={toggleSidebar}
+            className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[2px]"
+            style={{ animation: "fadeIn 0.2s ease" }}
+          />
+        )}
+
         {/* Session sidebar */}
         <SessionSidebar
         user={user}
@@ -75,10 +101,11 @@ export default function App() {
         refreshKey={sidebarKey}
         isOpen={sidebarOpen}
         onToggle={toggleSidebar}
+        overlay={isMobile}
         knowledgeActive={view === "knowledge"}
-        onOpenKnowledge={() => setView("knowledge")}
+        onOpenKnowledge={() => { setView("knowledge"); closeSidebarOnMobile(); }}
         dashboardActive={view === "dashboard"}
-        onOpenDashboard={() => setView("dashboard")}
+        onOpenDashboard={() => { setView("dashboard"); closeSidebarOnMobile(); }}
       />
 
       {/* Chat area */}
@@ -91,16 +118,20 @@ export default function App() {
             <PanelLeftOpen className="w-5 h-5" />
           </button>
         )}
-        {view === "knowledge" ? (
-          <KnowledgePage />
-        ) : view === "dashboard" ? (
-          <DashboardPage />
-        ) : (
-          <ChatPage
-            sessionId={activeSessionId}
-            onSessionCreated={handleSessionCreated}
-          />
-        )}
+        {/* Crash của một trang chỉ thay trang đó bằng thông báo lỗi,
+            sidebar vẫn dùng được; key={view} reset boundary khi chuyển trang */}
+        <ErrorBoundary key={view} label="Trang này">
+          {view === "knowledge" ? (
+            <KnowledgePage />
+          ) : view === "dashboard" ? (
+            <DashboardPage />
+          ) : (
+            <ChatPage
+              sessionId={activeSessionId}
+              onSessionCreated={handleSessionCreated}
+            />
+          )}
+        </ErrorBoundary>
       </div>
       </div>
     </div>

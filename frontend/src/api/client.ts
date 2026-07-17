@@ -1,6 +1,10 @@
 import axios from "axios";
 
-const API_BASE = "http://localhost:8000";
+// Dev (npm run dev on :5173): talk to the local backend directly.
+// Production build: same-origin relative paths — the FastAPI server (or a
+// reverse proxy / Cloudflare Tunnel in front of it) serves both the SPA
+// and /api, so no CORS is involved.
+const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
 
 const api = axios.create({ baseURL: API_BASE });
 
@@ -160,6 +164,9 @@ export const documentsAPI = {
   content: (docId: string): Promise<DocContent> =>
     api.get(`/api/documents/${docId}/content`).then((r) => r.data),
   fileUrl: (docId: string) => `${API_BASE}/api/documents/${docId}/file`,
+  /** Original file bytes as a Blob (auth header applied) — for image thumbnails. */
+  fileBlob: (docId: string): Promise<Blob> =>
+    api.get(`/api/documents/${docId}/file`, { responseType: "blob" }).then((r) => r.data),
   uploadFile: (file: File, sessionId: string) => {
     const fd = new FormData();
     fd.append("file", file);
