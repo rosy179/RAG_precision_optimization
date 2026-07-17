@@ -9,7 +9,7 @@ import MessageBubble from "../components/MessageBubble";
 import AiRobotIcon from "../components/AiRobotIcon";
 import DocViewerPanel from "../components/DocViewerPanel";
 import type { ViewerTarget } from "../components/DocViewerPanel";
-import type { Message, Source } from "../components/MessageBubble";
+import type { AttachmentDoc, Message, Source } from "../components/MessageBubble";
 
 interface Props { sessionId: string | null; onSessionCreated: (id: string) => void; }
 
@@ -18,6 +18,8 @@ interface Attachment {
   name: string;
   status: "uploading" | "done" | "error";
   detail?: string;
+  /** Local object URL preview — set for image files */
+  previewUrl?: string;
 }
 
 interface SessionDoc {
@@ -63,7 +65,10 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     if (sessionIdRef.current !== sessionId) {
       pendingDocsRef.current = [];
       prevCountRef.current = 0; // reset so bulk-load scroll fires correctly
-      setAttachments([]);
+      setAttachments((p) => {
+        p.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+        return [];
+      });
       setInputFocused(false);
       setViewerTarget(null);
       setExcludedDocs(new Set());
@@ -164,7 +169,8 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     }
     for (const file of files) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setAttachments((p) => [...p, { id, name: file.name, status: "uploading" }]);
+      const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+      setAttachments((p) => [...p, { id, name: file.name, status: "uploading", previewUrl }]);
       try {
         const res = await documentsAPI.uploadFile(file, sid);
         pendingDocsRef.current.push(file.name);
@@ -314,6 +320,16 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     use_global_kb: useGlobalKb,
   }), [excludedDocs, sessionDocs, useGlobalKb]);
 
+  // Attachment names in messages → session doc (for thumbnails & click-to-open)
+  const resolveAttachment = useCallback(
+    (name: string) => sessionDocs.find((d) => d.name === name),
+    [sessionDocs],
+  );
+
+  const openAttachment = useCallback((doc: AttachmentDoc) => {
+    setViewerTarget({ docId: doc.id, scope: "session", title: doc.name });
+  }, []);
+
   const openSource = useCallback((s: Source) => {
     if (!s.doc_id) return;
     setViewerTarget({
@@ -335,7 +351,10 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
 
     const attached = pendingDocsRef.current;
     pendingDocsRef.current = [];
-    setAttachments((p) => p.filter((a) => a.status !== "done"));
+    setAttachments((p) => {
+      p.forEach((a) => a.status === "done" && a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+      return p.filter((a) => a.status !== "done");
+    });
 
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: q, attachments: attached };
     const aiId = (Date.now() + 1).toString();
@@ -443,13 +462,15 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
             </div>
           ) : (
             /* ── Messages ── */
-            <div className="px-20 pt-6 pb-16">
+            <div className="px-4 sm:px-8 md:px-12 lg:px-20 pt-16 md:pt-6 pb-16">
               {messages.map((m, i) => (
                 <MessageBubble
                   key={m.id}
                   msg={m}
                   onFeedback={handleFeedback}
                   onOpenSource={openSource}
+                  resolveAttachment={resolveAttachment}
+                  onOpenAttachment={openAttachment}
                   onRegenerate={
                     !sending && m.role === "assistant" && i === messages.length - 1
                       ? regenerate
@@ -464,12 +485,11 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
         {/* Input bar */}
         <div className="shrink-0 flex flex-col items-center">
           <div
-            className="w-full pb-6 transition-all duration-500 ease-out"
-            style={{
-              maxWidth: isEmpty && !inputFocused ? '660px' : '100%',
-              paddingLeft: isEmpty && !inputFocused ? '24px' : '80px',
-              paddingRight: isEmpty && !inputFocused ? '24px' : '80px',
-            }}
+            className={`w-full pb-4 md:pb-6 transition-all duration-500 ease-out ${
+              isEmpty && !inputFocused
+                ? "max-w-[660px] px-4 sm:px-6"
+                : "max-w-full px-3 sm:px-8 md:px-12 lg:px-20"
+            }`}
           >
           {/* Gradient border wrapper */}
           <div
@@ -480,7 +500,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
             }}
           >
             <div
-              className="rounded-3xl px-5 py-4 transition-all duration-300"
+              className="rounded-3xl px-3.5 py-3 sm:px-5 sm:py-4 transition-all duration-300"
               style={{
                 background: "rgba(255,255,255,0.88)",
                 backdropFilter: "blur(24px)",
@@ -531,35 +551,76 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                       Đang ghi âm… bấm ⏹ để dừng & upload
                     </span>
                   )}
-                  {attachments.map((a) => (
-                    <span
-                      key={a.id}
-                      className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 max-w-[280px]"
-                      style={
-                        a.status === "error"
-                          ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#EF4444" }
-                          : { background: "rgba(124,58,237,0.07)", border: "1px solid rgba(124,58,237,0.15)", color: "#1A1A2E" }
-                      }
-                    >
-                      {a.status === "uploading" && <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" style={{ color: "#7C3AED" }} />}
-                      {a.status === "done" && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#10B981" }} />}
-                      {a.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
-                      <span className="truncate">{a.name}</span>
-                      {a.detail && <span className="text-gray-400 shrink-0">· {a.detail}</span>}
-                      {a.status !== "uploading" && (
-                        <button
-                          onClick={() => {
-                            setAttachments((p) => p.filter((x) => x.id !== a.id));
-                            const i = pendingDocsRef.current.indexOf(a.name);
-                            if (i !== -1) pendingDocsRef.current.splice(i, 1);
-                          }}
-                          className="text-gray-400 hover:text-gray-600 shrink-0 transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      )}
-                    </span>
-                  ))}
+                  {attachments.map((a) => {
+                    const remove = () => {
+                      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+                      setAttachments((p) => p.filter((x) => x.id !== a.id));
+                      const i = pendingDocsRef.current.indexOf(a.name);
+                      if (i !== -1) pendingDocsRef.current.splice(i, 1);
+                    };
+                    // Image attachment → mini thumbnail with status overlay
+                    if (a.previewUrl) {
+                      return (
+                        <span key={a.id} className="relative inline-block" title={a.name}>
+                          <img
+                            src={a.previewUrl}
+                            alt={a.name}
+                            className="h-14 w-14 object-cover rounded-2xl block"
+                            style={{
+                              border: a.status === "error"
+                                ? "1.5px solid rgba(239,68,68,0.5)"
+                                : "1.5px solid rgba(124,58,237,0.25)",
+                              opacity: a.status === "uploading" ? 0.6 : 1,
+                            }}
+                          />
+                          {a.status === "uploading" && (
+                            <span className="absolute inset-0 flex items-center justify-center">
+                              <Loader2 className="w-4 h-4 animate-spin" style={{ color: "#7C3AED" }} />
+                            </span>
+                          )}
+                          {a.status === "error" && (
+                            <span className="absolute inset-0 flex items-center justify-center rounded-2xl" style={{ background: "rgba(239,68,68,0.15)" }}>
+                              <AlertCircle className="w-4 h-4" style={{ color: "#EF4444" }} />
+                            </span>
+                          )}
+                          {a.status !== "uploading" && (
+                            <button
+                              onClick={remove}
+                              className="absolute -top-1.5 -right-1.5 rounded-full flex items-center justify-center shadow transition-colors"
+                              style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.08)", width: 18, height: 18 }}
+                            >
+                              <X className="w-3 h-3 text-gray-500 hover:text-gray-700" />
+                            </button>
+                          )}
+                        </span>
+                      );
+                    }
+                    return (
+                      <span
+                        key={a.id}
+                        className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 max-w-[280px]"
+                        style={
+                          a.status === "error"
+                            ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#EF4444" }
+                            : { background: "rgba(124,58,237,0.07)", border: "1px solid rgba(124,58,237,0.15)", color: "#1A1A2E" }
+                        }
+                      >
+                        {a.status === "uploading" && <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" style={{ color: "#7C3AED" }} />}
+                        {a.status === "done" && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#10B981" }} />}
+                        {a.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                        <span className="truncate">{a.name}</span>
+                        {a.detail && <span className="text-gray-400 shrink-0">· {a.detail}</span>}
+                        {a.status !== "uploading" && (
+                          <button
+                            onClick={remove}
+                            className="text-gray-400 hover:text-gray-600 shrink-0 transition-colors"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
                 </div>
               )}
 
@@ -620,7 +681,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
               )}
 
               {/* Main row: textarea + action buttons */}
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3">
                 <textarea
                   ref={textareaRef}
                   className="flex-1 outline-none resize-none text-sm leading-6 bg-transparent placeholder-[#9CA3AF]"
@@ -635,7 +696,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                 />
 
                 {/* Action buttons */}
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
                   {/* Source picker button */}
                   <button
                     onClick={() => setPickerOpen((v) => !v)}
@@ -730,7 +791,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                     onClick={sending ? stopStreaming : send}
                     disabled={!sending && !input.trim()}
                     title={sending ? "Dừng tạo câu trả lời" : "Gửi"}
-                    className="h-9 px-4 rounded-2xl flex items-center gap-2 text-white text-xs font-semibold transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="h-9 px-3 sm:px-4 rounded-2xl flex items-center gap-2 text-white text-xs font-semibold transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{
                       background: sending
                         ? "linear-gradient(135deg, #EF4444, #DC2626)"
@@ -798,20 +859,10 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
               animation: "fadeIn 0.2s ease",
             }}
           />
-          {/* Drawer panel */}
+          {/* Drawer panel — mobile: full màn hình, tablet/desktop: panel bên phải */}
           <div
-            style={{
-              position: "fixed",
-              top: 0,
-              right: 0,
-              bottom: 0,
-              width: "min(44%, 560px)",
-              zIndex: 41,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)",
-            }}
+            className="fixed inset-y-0 right-0 z-[41] flex flex-col overflow-hidden w-full sm:w-[min(70vw,520px)] lg:w-[min(44vw,560px)]"
+            style={{ animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)" }}
           >
             <DocViewerPanel target={viewerTarget} onClose={() => setViewerTarget(null)} />
           </div>

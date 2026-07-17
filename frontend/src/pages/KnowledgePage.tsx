@@ -141,9 +141,9 @@ export default function KnowledgePage() {
         }}
       />
 
-      <div className="flex flex-col flex-1 min-w-0 px-10 py-8 overflow-y-auto">
+      <div className="flex flex-col flex-1 min-w-0 px-4 py-5 sm:px-6 md:px-10 md:py-8 pt-16 md:pt-8 overflow-y-auto">
         {/* Header */}
-        <div className="flex items-start justify-between gap-4 mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4 mb-5 md:mb-6">
           <div className="flex items-center gap-3">
             <div
               className="w-11 h-11 rounded-2xl flex items-center justify-center"
@@ -324,7 +324,7 @@ export default function KnowledgePage() {
                 <button
                   onClick={(e) => { e.stopPropagation(); setViewerTarget({ docId: d.id, scope: "global", title: d.name }); }}
                   title="Xem nội dung"
-                  className="opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-all shrink-0"
+                  className="hidden md:flex opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-all shrink-0"
                 >
                   <Eye className="w-4 h-4" />
                 </button>
@@ -349,7 +349,7 @@ export default function KnowledgePage() {
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }}
                     title="Xóa khỏi kho chung"
                     disabled={deleting === d.id}
-                    className="opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0 disabled:opacity-100"
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0 disabled:opacity-100"
                   >
                     {deleting === d.id
                       ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -379,18 +379,8 @@ export default function KnowledgePage() {
             }}
           />
           <div
-            style={{
-              position: "fixed",
-              top: 0,
-              right: 0,
-              bottom: 0,
-              width: "min(44%, 560px)",
-              zIndex: 41,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)",
-            }}
+            className="fixed inset-y-0 right-0 z-[41] flex flex-col overflow-hidden w-full sm:w-[min(70vw,520px)] lg:w-[min(44vw,560px)]"
+            style={{ animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)" }}
           >
             <DocViewerPanel target={viewerTarget} onClose={() => setViewerTarget(null)} />
           </div>

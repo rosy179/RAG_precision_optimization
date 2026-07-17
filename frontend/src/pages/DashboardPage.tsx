@@ -202,14 +202,14 @@ export default function DashboardPage() {
 
   return (
     <div
-      className="flex flex-col flex-1 h-full overflow-y-auto px-10 py-8"
+      className="flex flex-col flex-1 h-full overflow-y-auto px-4 py-5 sm:px-6 md:px-10 md:py-8 pt-16 md:pt-8"
       style={{
         background: "rgba(255,255,255,0.3)",
         backdropFilter: "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
       }}
     >
-      <div className="flex items-start justify-between gap-4 mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4 mb-5 md:mb-6">
         <div className="flex items-center gap-3">
           <div
             className="w-11 h-11 rounded-2xl flex items-center justify-center"
