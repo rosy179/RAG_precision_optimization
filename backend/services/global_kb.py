@@ -9,6 +9,7 @@ merges retrieval from the session's own documents and this KB.
 
 import os
 import re
+import logging
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,8 @@ from rank_bm25 import BM25Okapi
 
 from dotenv import load_dotenv
 load_dotenv()
+
+log = logging.getLogger("rag.kb")
 
 DB_PATH     = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
@@ -80,10 +83,13 @@ class GlobalKBService:
         # BM25 (tiny, rebuilt per query), the KB corpus can be large, so the
         # index is rebuilt only on ingestion.
         self._bm25_state: tuple[Optional[BM25Okapi], list[dict]] = (None, [])
+        # Bumped on every ingest/remove/reload — consumed by the per-user
+        # answer caches to expire entries built on an older corpus.
+        self._version = 0
 
         self._restore_from_chroma()
-        print(f"[KB] Global knowledge base ready: "
-              f"{len(self._doc_registry)} docs, {len(self._chunks_store)} chunks.")
+        log.info("Global knowledge base ready: %d docs, %d chunks.",
+                 len(self._doc_registry), len(self._chunks_store))
 
     # ── Ingestion ──────────────────────────────────────────
 
@@ -126,6 +132,7 @@ class GlobalKBService:
                 "created_at": created_at,
             }]
             self._rebuild_bm25()
+            self._version += 1
         return len(chunks)
 
     def remove_document(self, doc_id: str):
@@ -140,6 +147,7 @@ class GlobalKBService:
             self._chunks_store = [c for c in self._chunks_store if c.get("doc_id") != doc_id]
             self._doc_registry = [d for d in self._doc_registry if d["id"] != doc_id]
             self._rebuild_bm25()
+            self._version += 1
 
     def get_documents(self) -> list[dict]:
         return self._doc_registry
@@ -171,6 +179,10 @@ class GlobalKBService:
     def is_empty(self) -> bool:
         return not self._chunks_store
 
+    @property
+    def version(self) -> int:
+        return self._version
+
     def reload(self) -> dict:
         """Re-read the persisted Chroma collections into memory (registry +
         BM25 index). Lets bulk ingests done by scripts/ingest_knowledge.py in
@@ -180,6 +192,7 @@ class GlobalKBService:
             self._doc_registry = []
             self._bm25_state = (None, [])
             self._restore_from_chroma()
+            self._version += 1
         return {"documents": len(self._doc_registry), "chunks": len(self._chunks_store)}
 
     # ── Search (consumed by UserRAGService.query) ──────────
@@ -294,4 +307,4 @@ class GlobalKBService:
             } for doc_id, info in by_doc.items()]
             self._rebuild_bm25()
         except Exception as e:
-            print(f"[KB] Restore warning: {e}")
+            log.warning("Restore warning: %s", e)

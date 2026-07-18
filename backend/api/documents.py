@@ -1,3 +1,4 @@
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,20 @@ _IMAGE_MEDIA_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg", ".webp": "image/webp",
 }
+
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
+
+
+async def _read_limited(file: UploadFile) -> bytes:
+    """Read an upload in 1 MB slices, rejecting anything over MAX_UPLOAD_MB
+    before the whole body is buffered in memory."""
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    buf = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise HTTPException(413, f"File quá lớn — giới hạn {MAX_UPLOAD_MB} MB")
+    return bytes(buf)
 
 
 def _pdf_path(doc_id: str) -> Path:
@@ -59,7 +74,7 @@ async def upload_file(
         if ext not in dp.ALLOWED_EXTENSIONS:
             raise HTTPException(400, f"Unsupported file type: {ext}")
 
-        file_bytes = await file.read()
+        file_bytes = await _read_limited(file)
         try:
             chunks, summary, doc_type = dp.process_file(file_bytes, filename, file.content_type or "")
         except openai.APIError as e:
@@ -117,6 +132,23 @@ async def upload_file(
 
     else:
         raise HTTPException(400, "Provide either a file or a URL")
+
+
+@router.post("/transcribe")
+async def transcribe_voice(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Speech-to-text for voice input in the chat box (fallback for browsers
+    without the Web Speech API). Returns text only — nothing is indexed."""
+    audio_bytes = await _read_limited(file)
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio")
+    try:
+        text = dp.transcribe_audio(audio_bytes, file.filename or "voice.webm")
+    except openai.APIError as e:
+        raise HTTPException(502, openai_error_detail(e)) from e
+    return {"text": text.strip()}
 
 
 @router.get("")

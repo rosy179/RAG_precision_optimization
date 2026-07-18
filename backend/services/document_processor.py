@@ -142,16 +142,86 @@ def process_pdf(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     return chunks, summary
 
 
-def process_url(url: str) -> tuple[list[dict], str]:
+# URL ingestion download cap — bounds both memory use and what an SSRF
+# attempt could exfiltrate in one response.
+MAX_FETCH_BYTES = 5 * 1024 * 1024
+
+
+def _require_public_url(url: str) -> None:
+    """Reject URLs that would make the server request itself or the internal
+    network (SSRF): non-http(s) schemes, and hosts resolving to loopback,
+    private, link-local or any other non-global address (this also covers
+    cloud metadata endpoints like 169.254.169.254)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Chỉ hỗ trợ URL http/https")
+    if not parsed.hostname:
+        raise ValueError("URL không hợp lệ")
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
+            proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise ValueError(f"Không phân giải được tên miền: {parsed.hostname}") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            raise ValueError(
+                "URL trỏ tới địa chỉ mạng nội bộ — đã chặn để tránh SSRF")
+
+
+def _fetch_public_url(url: str) -> tuple[bytes, str]:
+    """GET with SSRF validation re-run on every redirect hop (max 5) and a
+    MAX_FETCH_BYTES download cap. Returns (body, encoding guess).
+
+    Known limit: validation resolves DNS separately from the request itself,
+    so a hostile nameserver flipping records between the two lookups (DNS
+    rebinding) is not covered — acceptable for this deployment.
+    """
     import requests
+    from urllib.parse import urljoin
+
     headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
         "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
     }
-    resp = requests.get(url, timeout=20, headers=headers)
-    resp.raise_for_status()
-    html = resp.text
+    for _ in range(5):
+        _require_public_url(url)
+        resp = requests.get(url, timeout=20, headers=headers,
+                            allow_redirects=False, stream=True)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("Location")
+            if not loc:
+                raise ValueError("Chuyển hướng không có địa chỉ đích")
+            url = urljoin(url, loc)
+            continue
+        resp.raise_for_status()
+        raw = bytearray()
+        for chunk in resp.iter_content(65536):
+            raw.extend(chunk)
+            if len(raw) > MAX_FETCH_BYTES:
+                raise ValueError("Trang quá lớn (giới hạn 5 MB)")
+        # requests defaults to ISO-8859-1 when the header has no charset —
+        # sniff the meta tag instead, falling back to UTF-8.
+        enc = resp.encoding
+        if not enc or enc.lower() == "iso-8859-1":
+            m = re.search(rb'charset=["\']?([\w-]{2,20})', bytes(raw[:4096]), re.I)
+            enc = m.group(1).decode("ascii", "ignore") if m else "utf-8"
+        return bytes(raw), enc
+    raise ValueError("Quá nhiều lần chuyển hướng (redirect)")
+
+
+def process_url(url: str) -> tuple[list[dict], str]:
+    raw, enc = _fetch_public_url(url)
+    try:
+        html = raw.decode(enc, errors="replace")
+    except LookupError:
+        html = raw.decode("utf-8", errors="replace")
 
     text, title = "", ""
 
@@ -231,20 +301,22 @@ def process_image(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     return chunks, summary
 
 
-def process_audio(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+def transcribe_audio(file_bytes: bytes, filename: str) -> str:
+    """Whisper speech-to-text; mock text when no API key is configured."""
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key or api_key.startswith("sk-your"):
-        transcript = f"[MOCK] Audio transcription for {filename}"
-    else:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        resp = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(filename, file_bytes),
-        )
-        transcript = resp.text.strip()
+        return f"[MOCK] Audio transcription for {filename}"
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    resp = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=(filename, file_bytes),
+    )
+    return resp.text.strip()
 
-    transcript = _clean_text(transcript)
+
+def process_audio(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+    transcript = _clean_text(transcribe_audio(file_bytes, filename))
     doc_id = _make_doc_id(filename)
     chunks = _sliding_window_chunks(transcript, doc_id, filename, "audio")
     summary = _generate_summary(transcript[:4000], filename)

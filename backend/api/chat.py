@@ -26,15 +26,19 @@ _PRICE_OUT = 0.60 / 1_000_000
 
 def _log_query(db2: Session, user_id: str, session_id: str, complexity: str,
                n_hops: int, latency_ms: int, answer: str, n_sources: int,
-               status: str):
+               status: str, usage: dict | None = None):
     """Best-effort per-query log for the monitoring dashboard.
 
-    Token counts are rough estimates (context size dominates input; each hop
-    adds a router/hop LLM call) — good enough for cost trends, not billing.
+    Real token counts (accumulated from OpenAI usage across every LLM call
+    of the request) are used when available; otherwise falls back to rough
+    estimates — good enough for cost trends, not billing.
     """
     try:
-        tokens_in = 400 + n_sources * 500 + n_hops * 1500
-        tokens_out = max(1, len(answer) // 4) + n_hops * 60
+        if usage and usage.get("real"):
+            tokens_in, tokens_out = usage.get("in", 0), usage.get("out", 0)
+        else:
+            tokens_in = 400 + n_sources * 500 + n_hops * 1500
+            tokens_out = max(1, len(answer) // 4) + n_hops * 60
         db2.add(QueryLog(
             user_id=user_id, session_id=session_id, complexity=complexity,
             multihop=n_hops, latency_ms=latency_ms,
@@ -82,6 +86,19 @@ def _attached_doc_ids(db: Session, user_id: str, session_id: str,
         Document.name.in_(names),
     ).all()
     return [d.id for d in rows] or None
+
+
+def _question_with_attachments(question: str, attachments: list[str],
+                               attached_ids: list[str] | None) -> str:
+    """Deictic questions ("dự án này", "file này") sent WITH attachments refer
+    to those attachments — spell that out for retrieval/generation so recent
+    history (about older documents) can't hijack the subject. The stored user
+    message keeps the original question."""
+    if not attached_ids or not attachments:
+        return question
+    names = ", ".join(attachments)
+    return (f"{question}\n(Tài liệu đính kèm theo câu hỏi này: {names} — "
+            f'các cụm "tài liệu/dự án/bài viết/file này" chỉ tài liệu đính kèm đó.)')
 
 
 @router.post("/sessions")
@@ -136,63 +153,6 @@ def get_messages(
     ]
 
 
-@router.post("/sessions/{session_id}/chat")
-def chat(
-    session_id: str,
-    req: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    session = db.query(ChatSession).filter(
-        ChatSession.id == session_id, ChatSession.user_id == current_user.id
-    ).first()
-    if not session:
-        raise HTTPException(404, "Session not found")
-
-    rag = get_service(current_user.id)
-    attached_ids = _attached_doc_ids(db, current_user.id, session_id, req.attachments)
-    try:
-        result = rag.query(req.question, req.history, session_id=session_id,
-                           include_doc_ids=req.include_doc_ids,
-                           use_global_kb=req.use_global_kb,
-                           attached_doc_ids=attached_ids)
-    except openai.APIError as e:
-        raise HTTPException(502, openai_error_detail(e)) from e
-
-    # Save user message
-    user_msg = Message(
-        session_id=session_id,
-        role="user",
-        content=req.question,
-        attachments_json=json.dumps(req.attachments, ensure_ascii=False),
-    )
-    db.add(user_msg)
-
-    # Save assistant message
-    ai_msg = Message(
-        session_id=session_id,
-        role="assistant",
-        content=result["answer"],
-        sources_json=json.dumps(result["sources"], ensure_ascii=False),
-    )
-    db.add(ai_msg)
-
-    # Auto-title the session after first message
-    if session.title == "New Chat":
-        session.title = generate_session_title(req.question, result["answer"])
-
-    db.commit()
-
-    return {
-        "answer":     result["answer"],
-        "reasoning":  result.get("reasoning", ""),
-        "sources":    result["sources"],
-        "latency_ms": result.get("latency_ms", 0),
-        "from_cache": result.get("from_cache", False),
-        "complexity": result.get("complexity", "medium"),
-    }
-
-
 @router.post("/sessions/{session_id}/chat/stream")
 def chat_stream(
     session_id: str,
@@ -220,6 +180,7 @@ def chat_stream(
     # Resolve before streaming starts — the request-scoped db session may be
     # torn down once the generator is running.
     attached_ids = _attached_doc_ids(db, current_user.id, session_id, req.attachments)
+    gen_question = _question_with_attachments(req.question, req.attachments, attached_ids)
 
     def persist(db2: Session, answer: str, sources: list[dict],
                 steps: list[dict] | None = None) -> dict:
@@ -271,13 +232,47 @@ def chat_stream(
         steps: list[dict] = []
         complexity = "medium"
         n_hops = 0
+        retrieval_empty = False
+        # Real token usage accumulated across every LLM call of this request
+        usage: dict = {"in": 0, "out": 0, "real": False}
 
         def log(status: str):
             _log_query(db2, current_user.id, session_id, complexity, n_hops,
                        int((time.time() - t0) * 1000), "".join(parts),
-                       len(sources), status)
+                       len(sources), status, usage)
 
         try:
+            # Answer cache: a history/attachment-free question already
+            # answered in this same scope is replayed from memory —
+            # sources + reasoning steps restored, answer streamed in chunks.
+            cacheable = (not req.history and not req.attachments
+                         and not req.regenerate_message_id)
+            if cacheable:
+                hit = rag.cache_lookup(req.question, session_id,
+                                       req.include_doc_ids, req.use_global_kb)
+                if hit:
+                    complexity = hit["complexity"]
+                    sources = hit["sources"]
+                    usage["real"] = True  # served from cache: 0 tokens spent
+                    yield _sse("meta", {"sources": sources,
+                                        "complexity": complexity,
+                                        "from_cache": True})
+                    for s in hit["steps"]:
+                        steps.append(s)
+                        yield _sse("step", s)
+                    answer = hit["answer"]
+                    for i in range(0, len(answer), 64):
+                        parts.append(answer[i:i + 64])
+                        yield _sse("delta", {"text": answer[i:i + 64]})
+                    ids = persist(db2, answer, sources, steps)
+                    log("success")
+                    yield _sse("done", {
+                        "latency_ms": int((time.time() - t0) * 1000),
+                        "from_cache": True,
+                        **ids,
+                    })
+                    return
+
             if wants_prev_transform(req.question, req.history):
                 # "Dịch bản tóm tắt đó sang tiếng Nhật"-type requests re-render
                 # the PREVIOUS answer. Retrieval can't help (no chunk contains
@@ -294,7 +289,8 @@ def chat_stream(
                 sources = json.loads(prev_msg.sources_json or "[]") if prev_msg else []
                 yield _sse("meta", {"sources": sources, "complexity": complexity})
                 try:
-                    for delta in rag.transform_stream(req.question, prev):
+                    for delta in rag.transform_stream(req.question, prev,
+                                                      usage=usage):
                         parts.append(delta)
                         yield _sse("delta", {"text": delta})
                 except openai.APIError as e:
@@ -326,7 +322,7 @@ def chat_stream(
                     and not is_summary_question(req.question)
                     and rag.has_any_source(
                         session_id, req.include_doc_ids, req.use_global_kb)):
-                sub_questions = rag.route_multihop(req.question)
+                sub_questions = rag.route_multihop(req.question, usage=usage)
 
             if sub_questions:
                 complexity = "multihop"
@@ -335,11 +331,12 @@ def chat_stream(
                                     "n_hops": n_hops})
                 try:
                     for kind, payload in rag.multihop_events(
-                            req.question, sub_questions, req.history,
+                            gen_question, sub_questions, req.history,
                             session_id=session_id,
                             include_doc_ids=req.include_doc_ids,
                             use_global_kb=req.use_global_kb,
-                            attached_doc_ids=attached_ids):
+                            attached_doc_ids=attached_ids,
+                            usage=usage):
                         if kind == "step":
                             steps.append(payload)
                             yield _sse("step", payload)
@@ -358,10 +355,11 @@ def chat_stream(
                         return
             else:
                 try:
-                    ret = rag.retrieve(req.question, req.history, session_id=session_id,
+                    ret = rag.retrieve(gen_question, req.history, session_id=session_id,
                                        include_doc_ids=req.include_doc_ids,
                                        use_global_kb=req.use_global_kb,
-                                       attached_doc_ids=attached_ids)
+                                       attached_doc_ids=attached_ids,
+                                       usage=usage)
                 except openai.APIError as e:
                     yield _sse("error", {"detail": openai_error_detail(e)})
                     log("error")
@@ -371,12 +369,13 @@ def chat_stream(
                 yield _sse("meta", {"sources": sources, "complexity": complexity})
 
                 if ret["empty"]:
+                    retrieval_empty = True
                     parts.append(ret["notice"])
                     yield _sse("delta", {"text": ret["notice"]})
                 else:
                     try:
-                        for delta in rag.generate_stream(req.question, ret["top_chunks"],
-                                                         req.history):
+                        for delta in rag.generate_stream(gen_question, ret["top_chunks"],
+                                                         req.history, usage=usage):
                             parts.append(delta)
                             yield _sse("delta", {"text": delta})
                     except openai.APIError as e:
@@ -391,6 +390,16 @@ def chat_stream(
                 "latency_ms": int((time.time() - t0) * 1000),
                 **ids,
             })
+            # Cache AFTER the done event (embedding call would delay it);
+            # runs when StreamingResponse exhausts the generator normally.
+            if cacheable and parts and sources and not retrieval_empty:
+                try:
+                    rag.cache_store(req.question, session_id,
+                                    req.include_doc_ids, req.use_global_kb,
+                                    "".join(parts).strip(), sources,
+                                    complexity, steps)
+                except Exception:
+                    pass
         except GeneratorExit:
             # Client aborted (Stop button / closed tab): keep the partial
             # answer so the conversation stays coherent on reload.

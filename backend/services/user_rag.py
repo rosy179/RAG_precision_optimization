@@ -12,6 +12,9 @@ import json
 import math
 import time
 import hashlib
+import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -31,10 +34,18 @@ load_dotenv()
 
 from backend.services.global_kb import get_kb
 
+log = logging.getLogger("rag.user")
+
 DB_PATH     = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
 EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
 LLM_MODEL   = os.getenv("LLM_MODEL", "gpt-4o-mini")
 RERANKER    = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Answer cache: repeat questions in the same (session, source-filter, KB)
+# scope are served from memory instead of re-running the pipeline.
+ANSWER_CACHE_TTL_S = 3600
+ANSWER_CACHE_MAX   = 50
+ANSWER_CACHE_SIM   = 0.95  # cosine threshold for a semantic hit
 
 # System prompt for the chat UI. Unlike the eval pipeline (cot_rag.py, tuned
 # for short Ragas-scored answers), chat answers must be structured Markdown.
@@ -92,25 +103,18 @@ Truy vấn con: {sub_question}
 
 Trả lời ngắn:"""
 
-# Cross-lingual retrieval fix: the corpus is predominantly English, and every
-# stage degrades on a non-English query — ada-002 cross-lingual similarity is
-# weak, BM25 has zero term overlap, and the ms-marco CrossEncoder only
-# understands English. Retrieval therefore also runs an English translation
-# of the query; the ANSWER language still follows the user's question.
-TRANSLATE_QUERY_PROMPT = """\
-Dịch truy vấn tìm kiếm sau sang tiếng Anh để tìm trong kho tài liệu tiếng Anh.
-- Giữ nguyên tên riêng, thuật ngữ kỹ thuật, số liệu.
-- Nếu truy vấn đã là tiếng Anh, trả lại nguyên văn.
-Chỉ trả về bản dịch, không giải thích."""
-
-# Rewrites follow-up questions ("dịch sang tiếng Nhật", "nói rõ hơn ý 2")
-# into standalone retrieval queries using the conversation history.
-CONDENSE_PROMPT = """\
-Bạn nhận lịch sử hội thoại và một câu hỏi mới. Viết lại câu hỏi mới thành MỘT câu truy vấn tìm kiếm độc lập, nêu rõ chủ đề đang được nói tới, để tìm các đoạn tài liệu liên quan.
-- Giữ nguyên ngôn ngữ chính của chủ đề trong hội thoại.
-- Bỏ các yêu cầu về cách trình bày (ví dụ: "dịch sang tiếng Nhật", "tóm tắt lại", "viết ngắn hơn") — chỉ giữ chủ đề nội dung.
-- Nếu câu hỏi mới đã độc lập và rõ ràng, trả lại nguyên văn.
-Chỉ trả về câu truy vấn, không giải thích gì thêm."""
+# Query preparation, ONE call doing two formerly sequential round-trips:
+# (a) cross-lingual fix — the corpus is predominantly English (ada-002
+# cross-lingual similarity is weak, BM25 has zero term overlap, the ms-marco
+# CrossEncoder only understands English), so retrieval also runs an English
+# variant of the query (the ANSWER language still follows the question);
+# (b) follow-up condensing — "dịch sang tiếng Nhật", "nói rõ hơn ý 2" carry
+# no retrieval signal, so they are rewritten standalone using the history.
+QUERY_PREP_PROMPT = """\
+Bạn nhận lịch sử hội thoại (có thể rỗng) và một câu hỏi mới. Trả về JSON có đúng 2 khóa:
+- "query": câu hỏi viết lại thành MỘT câu truy vấn tìm kiếm độc lập, nêu rõ chủ đề đang nói tới (dựa vào lịch sử nếu câu hỏi phụ thuộc ngữ cảnh; nếu đã độc lập và rõ ràng thì giữ NGUYÊN VĂN). Bỏ các yêu cầu về cách trình bày (ví dụ: "dịch sang tiếng Nhật", "tóm tắt lại", "viết ngắn hơn") — chỉ giữ chủ đề nội dung, giữ ngôn ngữ gốc.
+- "query_en": bản dịch tiếng Anh của "query" để tìm trong kho tài liệu tiếng Anh; giữ nguyên tên riêng, thuật ngữ kỹ thuật, số liệu. Nếu "query" đã là tiếng Anh thì lặp lại nguyên văn.
+Chỉ trả về JSON, không giải thích."""
 
 # "Summarize this link/document"-type questions carry no topical signal —
 # similarity search returns noise for them (often unrelated global-KB chunks).
@@ -176,33 +180,64 @@ Bạn nhận "Câu trả lời trước" của trợ lý và một yêu cầu tr
 
 # Shared reranker (loaded once at startup)
 _reranker: Optional[CrossEncoder] = None
-# Per-user RAG service instances
-_instances: dict[str, "UserRAGService"] = {}
+# Per-user RAG service instances, LRU-capped: each one keeps its user's
+# chunk texts + BM25 token lists in memory, so idle users must be evicted.
+# Eviction is safe — all state is restored from ChromaDB on next access.
+MAX_INSTANCES = int(os.getenv("MAX_RAG_INSTANCES", "16"))
+_instances: "OrderedDict[str, UserRAGService]" = OrderedDict()
+_instances_lock = threading.Lock()
 
 
 def warm_up():
     global _reranker
-    print("[RAG] Loading CrossEncoder reranker...")
+    log.info("Loading CrossEncoder reranker...")
     try:
         # Local cache first — HF Hub outages must not block startup.
         _reranker = CrossEncoder(RERANKER, local_files_only=True)
-        print("[RAG] Reranker ready (local cache).")
+        log.info("Reranker ready (local cache).")
     except Exception:
         try:
             _reranker = CrossEncoder(RERANKER)
-            print("[RAG] Reranker ready.")
+            log.info("Reranker ready.")
         except Exception as e:
-            print(f"[RAG] Reranker load failed: {e}")
+            log.error("Reranker load failed: %s", e)
 
 
 def get_service(user_id: str) -> "UserRAGService":
-    if user_id not in _instances:
-        _instances[user_id] = UserRAGService(user_id)
-    return _instances[user_id]
+    with _instances_lock:
+        svc = _instances.get(user_id)
+        if svc is None:
+            svc = UserRAGService(user_id)
+            _instances[user_id] = svc
+        else:
+            _instances.move_to_end(user_id)
+        while len(_instances) > MAX_INSTANCES:
+            evicted, _ = _instances.popitem(last=False)
+            log.info("LRU-evicted RAG service of user %s…", evicted[:8])
+    return svc
 
 
 def _tokenize(text: str) -> list:
     return re.findall(r'\w+', text.lower())
+
+
+def _add_usage(usage: dict | None, res) -> None:
+    """Accumulate real token usage from an OpenAI response (or streaming
+    chunk carrying `.usage`) into the caller's accumulator dict — replaces
+    the dashboard's rough cost estimates whenever available."""
+    u = getattr(res, "usage", None)
+    if usage is None or u is None:
+        return
+    usage["in"] = usage.get("in", 0) + (u.prompt_tokens or 0)
+    usage["out"] = usage.get("out", 0) + (u.completion_tokens or 0)
+    usage["real"] = True
+
+
+def _cosine(a, b) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 def _merge_lexical(session_hits: list[dict], global_hits: list[dict], n: int = 20) -> list[dict]:
@@ -334,6 +369,8 @@ class UserRAGService:
             embed_fn = OpenAIEmbeddingFunction(api_key=self._api_key, model_name=EMBED_MODEL)
         else:
             embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        # Kept for the answer cache's question-similarity checks.
+        self._embed_fn = embed_fn
 
         self._chunk_col   = self._chroma.get_or_create_collection(
             f"u_{user_id[:8]}_chunks",
@@ -349,6 +386,18 @@ class UserRAGService:
         self._chunks_store: list[dict] = []  # in-memory for BM25
         self._doc_registry: list[dict] = []  # {id, name, type, session_id, chunk_count}
 
+        # Guards the in-memory stores + BM25 cache: FastAPI runs sync
+        # endpoints on a threadpool, so uploads and queries can overlap.
+        self._lock = threading.Lock()
+        # (session_id, doc-filter) → (BM25Okapi, pool). BM25 IDF statistics
+        # depend on the exact chunk pool, so each filter combination gets its
+        # own index; any document add/remove invalidates all entries.
+        self._bm25_cache: OrderedDict[tuple, tuple] = OrderedDict()
+        # Answer cache: entries carry a (doc-store, global-KB) version pair
+        # and silently expire when either corpus changes.
+        self._store_version = 0
+        self._answer_cache: OrderedDict[str, dict] = OrderedDict()
+
         # Restore from ChromaDB on init (handles server restarts)
         self._restore_from_chroma()
 
@@ -361,6 +410,9 @@ class UserRAGService:
 
         doc_id = doc_meta["id"]
         session_id = doc_meta.get("session_id", "")
+        # Persisted so "tài liệu mới nhất" stays correct across restarts
+        # (the deictic digest fallback picks the most recently added doc).
+        added_at = time.time()
 
         # Upsert chunks into chunk collection (page only exists for PDFs —
         # Chroma metadata rejects None values, so include it conditionally)
@@ -373,6 +425,7 @@ class UserRAGService:
                 "title":  doc_meta["name"],
                 "source": doc_meta.get("type", "unknown"),
                 "chunk_index": i,
+                "added_at": added_at,
                 **({"page": c["page"]} if "page" in c else {}),
             } for i, c in enumerate(chunks)],
         )
@@ -385,21 +438,26 @@ class UserRAGService:
                         "session_id": session_id}],
         )
 
-        # Update in-memory BM25 store
-        for c in chunks:
-            self._chunks_store.append({"id": c["id"], "text": c["text"],
-                                       "title": doc_meta["name"], "doc_id": doc_id,
-                                       "session_id": session_id,
-                                       **({"page": c["page"]} if "page" in c else {})})
-
-        # Update registry
-        self._doc_registry.append({
-            "id": doc_id,
-            "name": doc_meta["name"],
-            "type": doc_meta.get("type", "unknown"),
-            "session_id": session_id,
-            "chunk_count": len(chunks),
-        })
+        # Swap (never mutate) the in-memory stores so in-flight queries keep
+        # a consistent snapshot; tokens are precomputed once for BM25.
+        new_entries = [{"id": c["id"], "text": c["text"],
+                        "title": doc_meta["name"], "doc_id": doc_id,
+                        "session_id": session_id,
+                        "tokens": _tokenize(c["text"]),
+                        **({"page": c["page"]} if "page" in c else {})}
+                       for c in chunks]
+        with self._lock:
+            self._chunks_store = self._chunks_store + new_entries
+            self._doc_registry = self._doc_registry + [{
+                "id": doc_id,
+                "name": doc_meta["name"],
+                "type": doc_meta.get("type", "unknown"),
+                "session_id": session_id,
+                "chunk_count": len(chunks),
+                "added_at": added_at,
+            }]
+            self._bm25_cache.clear()
+            self._store_version += 1
 
         return len(chunks)
 
@@ -412,8 +470,11 @@ class UserRAGService:
             self._summary_col.delete(ids=[doc_id])
         except Exception:
             pass
-        self._chunks_store = [c for c in self._chunks_store if c.get("doc_id") != doc_id]
-        self._doc_registry = [d for d in self._doc_registry if d["id"] != doc_id]
+        with self._lock:
+            self._chunks_store = [c for c in self._chunks_store if c.get("doc_id") != doc_id]
+            self._doc_registry = [d for d in self._doc_registry if d["id"] != doc_id]
+            self._bm25_cache.clear()
+            self._store_version += 1
 
     def get_documents(self) -> list[dict]:
         return self._doc_registry
@@ -450,20 +511,25 @@ class UserRAGService:
                  include_doc_ids: list[str] | None = None,
                  use_global_kb: bool = True,
                  attached_doc_ids: list[str] | None = None,
-                 digest_ok: bool = True) -> dict:
+                 digest_ok: bool = True,
+                 usage: dict | None = None) -> dict:
         """Run the full retrieval stack (Layers 1-4) without generation.
 
         Returns top_chunks + UI-ready sources so callers can either generate
-        in one shot (query) or stream tokens (generate_stream).
+        in one shot (eval scripts) or stream tokens (generate_stream).
+        `usage` accumulates real token counts of internal LLM calls.
 
         include_doc_ids: session doc ids the user checked in the source
         picker (None = all session docs). use_global_kb=False excludes the
         shared KB for this question.
 
         attached_doc_ids: docs attached to THIS message — they are the
-        question's most likely subject, so they lead the doc shortlist and
-        anchor the summarize digest path. digest_ok=False disables that path
-        (multi-hop sub-queries must always run real retrieval).
+        question's subject, so retrieval is scoped to them entirely: a
+        deictic question ("dự án này dùng công nghệ gì?") carries no topical
+        signal, and without scoping an older session document with better
+        keyword overlap wins the ranking. digest_ok=False disables the
+        summarize digest path (multi-hop sub-queries must always run real
+        retrieval).
         """
         # Retrieval draws from two pools: chunks uploaded in THIS session
         # (per-conversation scope, as before) plus the shared global
@@ -474,7 +540,20 @@ class UserRAGService:
         if include_doc_ids is not None:
             allowed = set(include_doc_ids)
             session_chunks = [c for c in session_chunks if c.get("doc_id") in allowed]
-        kb_enabled = use_global_kb and not kb.is_empty()
+
+        # Docs attached to THIS message are its explicit subject — scope
+        # retrieval to them so an older session document or the shared KB
+        # can't outrank the document the user just attached. Falls through
+        # to the normal pools when the attachments have no indexed chunks.
+        attached_scope: set | None = None
+        if attached_doc_ids:
+            wanted = set(attached_doc_ids)
+            scoped = [c for c in session_chunks if c.get("doc_id") in wanted]
+            if scoped:
+                session_chunks = scoped
+                attached_scope = {c["doc_id"] for c in scoped}
+
+        kb_enabled = use_global_kb and not kb.is_empty() and attached_scope is None
         if not session_chunks and not kb_enabled:
             filtered_out = include_doc_ids is not None or not use_global_kb
             return {
@@ -497,6 +576,10 @@ class UserRAGService:
         session_filter = {"session_id": session_id} if session_id else None
 
         allowed_ids = set(include_doc_ids) if include_doc_ids is not None else None
+        if attached_scope is not None:
+            # Already respects the source picker: the scope was derived from
+            # the include_doc_ids-filtered chunk pool above.
+            allowed_ids = attached_scope
         session_docs = [d for d in self._doc_registry
                         if (not session_id or d.get("session_id") == session_id)
                         and (allowed_ids is None or d["id"] in allowed_ids)]
@@ -509,18 +592,16 @@ class UserRAGService:
                 digest["retrieval_ms"] = int((time.time() - t0) * 1000)
                 return digest
 
-        # Follow-ups ("dịch sang tiếng Nhật", "nói rõ hơn") carry no retrieval
-        # signal on their own — condense with history into a standalone query.
-        # Generation still sees the original question + history.
-        search_query = self._condense_question(question, history)
-
-        # Non-English queries also search via an English translation (the
-        # ASCII check is a cheap language proxy: VI diacritics / CJK fail it).
-        queries = [search_query]
-        if not search_query.isascii():
-            translated = self._translate_to_english(search_query)
-            if translated and translated.lower() != search_query.lower():
-                queries.append(translated)
+        # One LLM call prepares the search queries: condenses follow-ups
+        # ("dịch sang tiếng Nhật", "nói rõ hơn") into a standalone query via
+        # history, and adds an English variant for non-English questions.
+        # Generation still sees the original question + history. Condensing
+        # is skipped when the message carries its own attachments: the
+        # question is about THEM, and history (about earlier documents)
+        # would steer the rewritten query back to the old topic.
+        queries = self._prepare_queries(question, history,
+                                        condense=not attached_doc_ids,
+                                        usage=usage)
         # English-side query: the CrossEncoder, HyDE and the keyword-based
         # complexity heuristic all only work well in English.
         q_en = queries[-1]
@@ -685,44 +766,9 @@ class UserRAGService:
             "retrieval_ms": int((time.time() - t0) * 1000),
         }
 
-    def query(self, question: str, history: list[dict] | None = None,
-              session_id: str | None = None,
-              include_doc_ids: list[str] | None = None,
-              use_global_kb: bool = True,
-              attached_doc_ids: list[str] | None = None) -> dict:
-        t0 = time.time()
-        history = history or []
-
-        if wants_prev_transform(question, history):
-            prev = next(str(m["content"]) for m in reversed(history)
-                        if m.get("role") == "assistant" and m.get("content"))
-            answer = "".join(self.transform_stream(question, prev))
-            return {"answer": answer, "sources": [], "reasoning": "",
-                    "latency_ms": int((time.time() - t0) * 1000),
-                    "from_cache": False, "complexity": "transform"}
-
-        ret = self.retrieve(question, history, session_id,
-                            include_doc_ids=include_doc_ids,
-                            use_global_kb=use_global_kb,
-                            attached_doc_ids=attached_doc_ids)
-        if ret["empty"]:
-            return {"answer": ret["notice"], "sources": [], "reasoning": "",
-                    "latency_ms": 0, "from_cache": False, "complexity": "simple"}
-
-        # Layer 5 — Structured chat generation (grounded in top_chunks + history)
-        answer = self._generate_chat_answer(question, ret["top_chunks"], history)
-
-        return {
-            "answer":     answer,
-            "reasoning":  "",
-            "sources":    ret["sources"],
-            "latency_ms": int((time.time() - t0) * 1000),
-            "from_cache": False,
-            "complexity": ret["complexity"],
-        }
-
     def generate_stream(self, question: str, chunks: list[dict],
-                        history: list[dict] | None = None):
+                        history: list[dict] | None = None,
+                        usage: dict | None = None):
         """Yield answer text deltas (Layer 5, streaming variant).
 
         openai.APIError propagates to the caller so the endpoint can emit
@@ -743,12 +789,15 @@ class UserRAGService:
             temperature=0.2,
             max_tokens=1500,
             stream=True,
+            stream_options={"include_usage": True},
         )
         for event in stream:
             if event.choices and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
+            _add_usage(usage, event)  # only the final chunk carries usage
 
-    def transform_stream(self, question: str, prev_answer: str):
+    def transform_stream(self, question: str, prev_answer: str,
+                         usage: dict | None = None):
         """Yield the previous answer re-rendered per the user's instruction
         (translate, shorten, reformat) — no retrieval involved."""
         if not self._api_key or self._api_key.startswith("sk-your"):
@@ -768,10 +817,12 @@ class UserRAGService:
             temperature=0.2,
             max_tokens=2000,
             stream=True,
+            stream_options={"include_usage": True},
         )
         for event in stream:
             if event.choices and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
+            _add_usage(usage, event)
 
     # ── Multi-Hop (Layer 6) ────────────────────────────────
 
@@ -786,7 +837,8 @@ class UserRAGService:
             chunks = [c for c in chunks if c.get("doc_id") in allowed]
         return bool(chunks) or (use_global_kb and not get_kb().is_empty())
 
-    def route_multihop(self, question: str) -> list[str]:
+    def route_multihop(self, question: str,
+                       usage: dict | None = None) -> list[str]:
         """Decide whether the question needs chained retrieval.
 
         Returns ordered sub-queries (2-3) for multi-hop, or [] for the
@@ -804,6 +856,7 @@ class UserRAGService:
                 temperature=0.0,
                 max_tokens=200,
             )
+            _add_usage(usage, res)
             raw = (res.choices[0].message.content or "").strip()
         except Exception:
             return []
@@ -815,7 +868,8 @@ class UserRAGService:
         # A single sub-question is just a rephrase — not worth the extra hops
         return subs[:3] if len(subs) >= 2 else []
 
-    def _hop_answer(self, sub_question: str, chunks: list[dict]) -> str:
+    def _hop_answer(self, sub_question: str, chunks: list[dict],
+                    usage: dict | None = None) -> str:
         """Short bridging answer for one hop (feeds the next hop's query)."""
         if not chunks:
             return "NOT FOUND"
@@ -834,6 +888,7 @@ class UserRAGService:
                 temperature=0.0,
                 max_tokens=150,
             )
+            _add_usage(usage, res)
             return (res.choices[0].message.content or "").strip() or "NOT FOUND"
         except Exception:
             return "NOT FOUND"
@@ -843,7 +898,8 @@ class UserRAGService:
                         session_id: str | None = None,
                         include_doc_ids: list[str] | None = None,
                         use_global_kb: bool = True,
-                        attached_doc_ids: list[str] | None = None):
+                        attached_doc_ids: list[str] | None = None,
+                        usage: dict | None = None):
         """Chained-retrieval pipeline as an event generator.
 
         Yields ("step", dict) for each reasoning step, then
@@ -870,9 +926,9 @@ class UserRAGService:
                                 include_doc_ids=include_doc_ids,
                                 use_global_kb=use_global_kb,
                                 attached_doc_ids=attached_doc_ids,
-                                digest_ok=False)
+                                digest_ok=False, usage=usage)
             chunks = ret["top_chunks"] if not ret["empty"] else []
-            answer = self._hop_answer(sub_q, chunks)
+            answer = self._hop_answer(sub_q, chunks, usage=usage)
             all_chunks.extend(chunks)
             bridge.append({"hop": i, "sub_question": sub_q, "answer": answer})
             yield ("step", {"stage": "hop_done", "hop": i, "answer": answer,
@@ -897,7 +953,8 @@ class UserRAGService:
             f"(Các dữ kiện trung gian đã xác minh qua tìm kiếm nhiều bước — "
             f"dùng chúng để trả lời, vẫn trích dẫn [n] theo Nguồn:\n{facts})"
         )
-        for delta in self.generate_stream(synth_question, unique, history):
+        for delta in self.generate_stream(synth_question, unique, history,
+                                          usage=usage):
             yield ("delta", delta)
 
     # ── Internals ──────────────────────────────────────────
@@ -926,8 +983,12 @@ class UserRAGService:
                        if len(d["name"]) > 4
                        and d["name"].lower().rsplit(".", 1)[0] in q][:2]
         if not targets and _DOC_REF_RE.search(question):
-            # "đường link đó" / "bài viết này" — most recently added doc
-            targets = [session_docs[-1]["id"]]
+            # "đường link đó" / "bài viết này" — most recently added doc.
+            # added_at wins over registry position: after a restore the
+            # registry order is not guaranteed chronological.
+            newest = max(enumerate(session_docs),
+                         key=lambda t: (t[1].get("added_at", 0.0), t[0]))[1]
+            targets = [newest["id"]]
         if not targets:
             return None
 
@@ -961,39 +1022,29 @@ class UserRAGService:
             picks = sorted({round(j * (len(out) - 1) / (cap - 1)) for j in range(cap)})
             out = [out[i] for i in picks]
         # score 1.0: chunks are read from the requested doc, not ranked guesses
-        return [{**c, "scope": "session", "score": 1.0} for c in out]
+        return [{**{k: v for k, v in c.items() if k != "tokens"},
+                 "scope": "session", "score": 1.0} for c in out]
 
-    def _translate_to_english(self, query: str) -> str:
-        """English version of a retrieval query (see TRANSLATE_QUERY_PROMPT).
-        Returns "" on any failure so callers fall back to the original."""
-        if not self._api_key or self._api_key.startswith("sk-your"):
-            return ""
-        try:
-            client = openai.OpenAI(api_key=self._api_key)
-            res = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": TRANSLATE_QUERY_PROMPT},
-                    {"role": "user", "content": query},
-                ],
-                temperature=0.0,
-                max_tokens=150,
-            )
-            return (res.choices[0].message.content or "").strip().strip('"')
-        except Exception:
-            return ""
+    def _prepare_queries(self, question: str, history: list[dict],
+                         condense: bool = True,
+                         usage: dict | None = None) -> list[str]:
+        """Standalone search query + English variant in ONE LLM call.
 
-    def _condense_question(self, question: str, history: list[dict]) -> str:
-        """Rewrite a follow-up question into a standalone retrieval query.
-
-        First messages and mock mode skip the extra LLM call. Any failure
-        falls back to the raw question so retrieval still runs.
+        Follow-ups are condensed with the history, and non-English questions
+        (cheap proxy: isascii() fails on VI diacritics / CJK) get an English
+        twin for the EN-heavy corpus and CrossEncoder — formerly two
+        sequential round-trips of TTFT. Skipped entirely when neither is
+        needed; mock mode and any failure fall back to the raw question.
         """
-        if not history or not self._api_key or self._api_key.startswith("sk-your"):
-            return question
+        needs_condense = condense and bool(history)
+        needs_english = not question.isascii()
+        if not (needs_condense or needs_english):
+            return [question]
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            return [question]
         convo = "\n".join(
             f"{'Người dùng' if m.get('role') == 'user' else 'Trợ lý'}: {str(m['content'])[:500]}"
-            for m in history[-6:]
+            for m in (history[-6:] if needs_condense else [])
             if m.get("role") in ("user", "assistant") and m.get("content")
         )
         try:
@@ -1001,17 +1052,95 @@ class UserRAGService:
             res = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
-                    {"role": "system", "content": CONDENSE_PROMPT},
-                    {"role": "user",
-                     "content": f"Lịch sử hội thoại:\n{convo}\n\nCâu hỏi mới: {question}\n\nCâu truy vấn độc lập:"},
+                    {"role": "system", "content": QUERY_PREP_PROMPT},
+                    {"role": "user", "content":
+                        f"Lịch sử hội thoại:\n{convo or '(không có)'}\n\nCâu hỏi mới: {question}"},
                 ],
                 temperature=0.0,
-                max_tokens=120,
+                max_tokens=250,
+                response_format={"type": "json_object"},
             )
-            rewritten = (res.choices[0].message.content or "").strip().strip('"')
-            return rewritten or question
+            _add_usage(usage, res)
+            data = json.loads(res.choices[0].message.content or "{}")
+            q = str(data.get("query") or "").strip() or question
+            q_en = str(data.get("query_en") or "").strip()
+            if q_en and q_en.lower() != q.lower():
+                return [q, q_en]
+            return [q]
         except Exception:
-            return question
+            return [question]
+
+    # ── Answer cache ───────────────────────────────────────
+
+    def _cache_scope(self, session_id: str | None,
+                     include_doc_ids: list[str] | None,
+                     use_global_kb: bool) -> tuple:
+        return (session_id or "",
+                None if include_doc_ids is None else frozenset(include_doc_ids),
+                bool(use_global_kb))
+
+    def _cache_versions(self) -> tuple:
+        """Doc-state fingerprint: any session-doc or global-KB change moves
+        it, silently expiring every answer cached on the old corpus."""
+        return (self._store_version, get_kb().version)
+
+    def _embed_question(self, question: str) -> list | None:
+        """Question embedding for cache similarity; None on any failure."""
+        try:
+            return list(self._embed_fn([question])[0])
+        except Exception:
+            return None
+
+    def cache_lookup(self, question: str, session_id: str | None = None,
+                     include_doc_ids: list[str] | None = None,
+                     use_global_kb: bool = True) -> dict | None:
+        """Cached final answer for a repeat question in the same scope.
+
+        Exact normalized-text match first (free); otherwise embedding cosine
+        ≥ ANSWER_CACHE_SIM against cached questions — one cheap embedding
+        call, attempted only when same-scope candidates exist. Callers must
+        only use this for history-free, attachment-free questions: follow-ups
+        depend on conversation state the cache cannot see.
+        """
+        scope = self._cache_scope(session_id, include_doc_ids, use_global_kb)
+        q_norm = " ".join(question.lower().split())
+        ver = self._cache_versions()
+        now = time.time()
+        with self._lock:
+            live = [e for e in self._answer_cache.values()
+                    if e["scope"] == scope and e["ver"] == ver
+                    and now - e["ts"] < ANSWER_CACHE_TTL_S]
+            for e in live:
+                if e["q_norm"] == q_norm:
+                    return e
+        candidates = [e for e in live if e.get("emb")]
+        if not candidates:
+            return None
+        emb = self._embed_question(question)  # network call — outside the lock
+        if not emb:
+            return None
+        sim, best = max(((_cosine(emb, e["emb"]), e) for e in candidates),
+                        key=lambda t: t[0])
+        return best if sim >= ANSWER_CACHE_SIM else None
+
+    def cache_store(self, question: str, session_id: str | None,
+                    include_doc_ids: list[str] | None, use_global_kb: bool,
+                    answer: str, sources: list[dict], complexity: str,
+                    steps: list[dict] | None = None) -> None:
+        scope = self._cache_scope(session_id, include_doc_ids, use_global_kb)
+        q_norm = " ".join(question.lower().split())
+        entry = {
+            "scope": scope, "q_norm": q_norm, "ver": self._cache_versions(),
+            "ts": time.time(), "emb": self._embed_question(question),
+            "answer": answer, "sources": sources,
+            "complexity": complexity, "steps": steps or [],
+        }
+        key = hashlib.sha1(repr((scope, q_norm)).encode()).hexdigest()
+        with self._lock:
+            self._answer_cache[key] = entry
+            self._answer_cache.move_to_end(key)
+            while len(self._answer_cache) > ANSWER_CACHE_MAX:
+                self._answer_cache.popitem(last=False)
 
     def _chat_messages(self, question: str, chunks: list[dict],
                        history: list[dict]) -> list[dict]:
@@ -1055,16 +1184,11 @@ class UserRAGService:
     def _bm25_search(self, queries: str | list[str], n: int = 20,
                      session_id: str | None = None,
                      allowed_doc_ids: set[str] | None = None) -> list[dict]:
-        # Score only within the session's chunks so IDF weights are not
-        # skewed by documents from other conversations.
         if isinstance(queries, str):
             queries = [queries]
-        pool = [c for c in self._chunks_store
-                if (not session_id or c.get("session_id") == session_id)
-                and (allowed_doc_ids is None or c.get("doc_id") in allowed_doc_ids)]
-        if not pool:
+        bm25, pool = self._bm25_for(session_id, allowed_doc_ids)
+        if bm25 is None:
             return []
-        bm25 = BM25Okapi([_tokenize(c["text"]) for c in pool])
         # Multi-language query variants: keep each chunk's best score
         # (an EN translation is what actually matches an EN corpus).
         merged = [0.0] * len(pool)
@@ -1073,15 +1197,34 @@ class UserRAGService:
                 if score > merged[idx]:
                     merged[idx] = score
         ranked = sorted(enumerate(merged), key=lambda x: x[1], reverse=True)[:n]
-        return [{**pool[idx], "scope": "session", "score": round(float(score), 4)}
+        return [{**{k: v for k, v in pool[idx].items() if k != "tokens"},
+                 "scope": "session", "score": round(float(score), 4)}
                 for idx, score in ranked if score > 0]
 
-    def _rebuild_bm25(self):
-        if not self._chunks_store:
-            self._bm25 = None
-            return
-        tokenized = [_tokenize(c["text"]) for c in self._chunks_store]
-        self._bm25 = BM25Okapi(tokenized)
+    def _bm25_for(self, session_id: str | None,
+                  allowed_doc_ids: set[str] | None) -> tuple:
+        """Cached BM25 index for one (session, source-picker) chunk pool.
+
+        Scoring stays within the exact pool so IDF weights are not skewed by
+        documents from other conversations or unchecked sources — hence the
+        filter is part of the cache key. Entries live until the next document
+        add/remove (which clears the cache) and are LRU-capped.
+        """
+        key = (session_id or "",
+               None if allowed_doc_ids is None else frozenset(allowed_doc_ids))
+        with self._lock:
+            entry = self._bm25_cache.get(key)
+            if entry is not None:
+                self._bm25_cache.move_to_end(key)
+                return entry
+            pool = [c for c in self._chunks_store
+                    if (not session_id or c.get("session_id") == session_id)
+                    and (allowed_doc_ids is None or c.get("doc_id") in allowed_doc_ids)]
+            entry = (BM25Okapi([c["tokens"] for c in pool]), pool) if pool else (None, [])
+            self._bm25_cache[key] = entry
+            while len(self._bm25_cache) > 8:
+                self._bm25_cache.popitem(last=False)
+            return entry
 
     def _restore_from_chroma(self):
         """Rebuild in-memory state from persisted ChromaDB on startup."""
@@ -1099,18 +1242,24 @@ class UserRAGService:
                     "id": cid, "text": text,
                     "title": meta.get("title", ""), "doc_id": doc_id,
                     "session_id": session_id,
+                    "tokens": _tokenize(text),
                     **({"page": meta["page"]} if "page" in meta else {}),
                 })
                 if doc_id not in chunk_by_doc:
                     chunk_by_doc[doc_id] = {"name": meta.get("title", ""), "type": meta.get("source", ""),
-                                            "session_id": session_id, "count": 0}
+                                            "session_id": session_id, "count": 0,
+                                            "added_at": float(meta.get("added_at", 0.0))}
                 chunk_by_doc[doc_id]["count"] += 1
 
-            for doc_id, info in chunk_by_doc.items():
+            # Chronological registry (docs indexed before added_at existed
+            # sort first, keeping their relative Chroma order).
+            for doc_id, info in sorted(chunk_by_doc.items(),
+                                       key=lambda kv: kv[1]["added_at"]):
                 self._doc_registry.append({
                     "id": doc_id, "name": info["name"],
                     "type": info["type"], "session_id": info["session_id"],
                     "chunk_count": info["count"],
+                    "added_at": info["added_at"],
                 })
         except Exception as e:
-            print(f"[RAG] Restore warning: {e}")
+            log.warning("Restore warning: %s", e)

@@ -1,8 +1,14 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+
+# App modules log via logging (rag.user, rag.kb, ...) — give them a handler
+# with timestamps; uvicorn's own loggers keep their config.
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from backend.database import create_tables
 from backend.api.auth import router as auth_router
