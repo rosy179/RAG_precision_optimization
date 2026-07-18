@@ -44,6 +44,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [urlTip, setUrlTip] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [viewerTarget, setViewerTarget] = useState<ViewerTarget | null>(null);
   // Source picker: which session docs + the shared KB take part in answers
@@ -57,8 +58,17 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  // Live dictation (Web Speech API): base = input when dictation started,
+  // final = committed transcript; interim text is re-rendered on top of both.
+  const recognitionRef = useRef<any>(null);
+  const recordingRef = useRef(false);
+  const voiceBaseRef = useRef("");
+  const voiceFinalRef = useRef("");
   const sessionIdRef = useRef<string | null>(sessionId);
   const pendingDocsRef = useRef<string[]>([]);
+  // Uploads still in flight — send() waits for them so a question typed right
+  // after pasting a link/file actually sees that newest document.
+  const inflightUploadsRef = useRef<Set<Promise<unknown>>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -204,6 +214,14 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     }
   }, [ensureSession, refreshSessionDocs]);
 
+  /** Register an upload so send() can wait for it (upload flows never reject
+   *  — errors surface as attachment chips). */
+  const trackUpload = useCallback((p: Promise<unknown>) => {
+    inflightUploadsRef.current.add(p);
+    p.finally(() => inflightUploadsRef.current.delete(p));
+    return p;
+  }, []);
+
   const openPicker = useCallback((accept: string) => {
     const el = fileInputRef.current;
     if (!el) return;
@@ -215,46 +233,114 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     const files = Array.from(e.clipboardData.files);
     if (files.length > 0) {
       e.preventDefault();
-      uploadFiles(files);
+      trackUpload(uploadFiles(files));
       return;
     }
     const text = e.clipboardData.getData("text").trim();
     if (URL_REGEX.test(text)) {
       e.preventDefault();
       setUrlTip(false);
-      addUrlAsDocument(text);
+      trackUpload(addUrlAsDocument(text));
     }
-  }, [uploadFiles, addUrlAsDocument]);
+  }, [uploadFiles, addUrlAsDocument, trackUpload]);
 
+  const micError = useCallback((detail: string) => {
+    setAttachments((p) => [...p, {
+      id: `${Date.now()}-mic`, name: "Micro", status: "error", detail,
+    }]);
+  }, []);
+
+  /** Voice input: live speech-to-text into the input box (Web Speech API).
+   *  Browsers without it (e.g. Firefox) record audio and transcribe it
+   *  server-side with Whisper — the text lands in the input box either way. */
   const startRecording = useCallback(async () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SR) {
+      const rec = new SR();
+      rec.lang = "vi-VN";
+      rec.continuous = true;
+      rec.interimResults = true;
+      voiceBaseRef.current = input ? input.replace(/\s+$/, "") + " " : "";
+      voiceFinalRef.current = "";
+      rec.onresult = (e: any) => {
+        // Late results after stop (e.g. right after Send cleared the input)
+        // must not resurrect the dictated text.
+        if (!recordingRef.current) return;
+        let interim = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const t = e.results[i][0].transcript;
+          if (e.results[i].isFinal) voiceFinalRef.current += t.trim() + " ";
+          else interim += t;
+        }
+        setInput(voiceBaseRef.current + voiceFinalRef.current + interim);
+      };
+      rec.onerror = (e: any) => {
+        if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+          recordingRef.current = false;
+          recognitionRef.current = null;
+          setRecording(false);
+          micError("Không truy cập được micro");
+        }
+        // "no-speech" / "aborted": onend restarts while still recording
+      };
+      rec.onend = () => {
+        // Chrome stops after a silence gap — keep listening until ⏹ is pressed
+        if (recordingRef.current && recognitionRef.current === rec) {
+          try { rec.start(); } catch { /* already stopped */ }
+        }
+      };
+      try {
+        rec.start();
+        recognitionRef.current = rec;
+        recordingRef.current = true;
+        setRecording(true);
+        textareaRef.current?.focus();
+      } catch {
+        micError("Không khởi động được nhận dạng giọng nói");
+      }
+      return;
+    }
+
+    // Fallback: record, then Whisper transcription fills the input box
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       const parts: Blob[] = [];
       recorder.ondataavailable = (e) => { if (e.data.size > 0) parts.push(e.data); };
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         const mime = recorder.mimeType || "audio/webm";
         const ext = mime.includes("ogg") ? "ogg" : "webm";
-        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-        const file = new File(parts, `ghi-am-${stamp}.${ext}`, { type: mime });
-        uploadFiles([file]);
+        const file = new File(parts, `voice.${ext}`, { type: mime });
+        setTranscribing(true);
+        try {
+          const res = await documentsAPI.transcribe(file);
+          const text = (res.text || "").trim();
+          if (text) setInput((prev) => (prev ? prev.replace(/\s+$/, "") + " " : "") + text);
+        } catch (e: any) {
+          micError(e?.response?.data?.detail || "Không chuyển được giọng nói thành văn bản");
+        } finally {
+          setTranscribing(false);
+          textareaRef.current?.focus();
+        }
       };
       recorder.start();
       recorderRef.current = recorder;
+      recordingRef.current = true;
       setRecording(true);
     } catch {
-      setAttachments((p) => [...p, {
-        id: `${Date.now()}-mic`, name: "Micro", status: "error",
-        detail: "Không truy cập được micro",
-      }]);
+      micError("Không truy cập được micro");
     }
-  }, [uploadFiles]);
+  }, [input, micError]);
 
   const stopRecording = useCallback(() => {
+    recordingRef.current = false;
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
     recorderRef.current?.stop();
     recorderRef.current = null;
     setRecording(false);
+    textareaRef.current?.focus();
   }, []);
 
   const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -345,9 +431,24 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   const send = useCallback(async () => {
     const q = input.trim();
     if (!q || sending) return;
+    if (recordingRef.current) stopRecording();
+    setSending(true);
+
+    // A question sent right after pasting a link / picking a file must wait
+    // for that upload: otherwise the newest document is neither indexed nor
+    // attached yet, and retrieval answers from the OLDER session documents.
+    while (inflightUploadsRef.current.size > 0) {
+      await Promise.allSettled(Array.from(inflightUploadsRef.current));
+    }
 
     const isNewSession = !sessionIdRef.current;
-    const sid = await ensureSession(false);
+    let sid: string;
+    try {
+      sid = await ensureSession(false);
+    } catch {
+      setSending(false);
+      return;
+    }
 
     const attached = pendingDocsRef.current;
     pendingDocsRef.current = [];
@@ -360,12 +461,11 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     const aiId = (Date.now() + 1).toString();
     setMessages((prev) => [...prev, userMsg, { id: aiId, role: "assistant", content: "", streaming: true }]);
     setInput("");
-    setSending(true);
 
     const history = messages.slice(-6).map((m) => ({ role: m.role, content: m.content }));
     await runStream(sid, aiId, { question: q, history, attachments: attached, ...sourceParams() });
     if (isNewSession) onSessionCreated(sid);
-  }, [input, sending, messages, ensureSession, onSessionCreated, runStream, sourceParams]);
+  }, [input, sending, messages, ensureSession, onSessionCreated, runStream, sourceParams, stopRecording]);
 
   const regenerate = useCallback(async () => {
     if (sending || !sessionIdRef.current) return;
@@ -426,7 +526,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
         className="hidden"
         onChange={(e) => {
           const files = Array.from(e.target.files || []);
-          if (files.length) uploadFiles(files);
+          if (files.length) trackUpload(uploadFiles(files));
           e.target.value = "";
         }}
       />
@@ -536,7 +636,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
               )}
 
               {/* Upload status chips */}
-              {(attachments.length > 0 || recording) && (
+              {(attachments.length > 0 || recording || transcribing) && (
                 <div className="flex flex-wrap gap-2 mb-3">
                   {recording && (
                     <span
@@ -548,7 +648,20 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                       }}
                     >
                       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                      Đang ghi âm… bấm ⏹ để dừng & upload
+                      Đang nghe… cứ nói, chữ sẽ hiện trong ô nhập — bấm ⏹ để dừng
+                    </span>
+                  )}
+                  {transcribing && (
+                    <span
+                      className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 font-medium"
+                      style={{
+                        background: "rgba(124,58,237,0.07)",
+                        border: "1px solid rgba(124,58,237,0.15)",
+                        color: "#7C3AED",
+                      }}
+                    >
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Đang chuyển giọng nói thành văn bản…
                     </span>
                   )}
                   {attachments.map((a) => {
@@ -685,7 +798,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                 <textarea
                   ref={textareaRef}
                   className="flex-1 outline-none resize-none text-sm leading-6 bg-transparent placeholder-[#9CA3AF]"
-                  placeholder="Ask me anything........"
+                  placeholder={recording ? "Đang nghe… hãy nói câu hỏi của bạn" : "Ask me anything........"}
                   style={{ color: "#1A1A2E" }}
                   rows={1}
                   value={input}
@@ -729,7 +842,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                   {/* Mic button */}
                   <button
                     onClick={recording ? stopRecording : startRecording}
-                    title={recording ? "Dừng ghi âm và upload" : "Ghi âm câu hỏi / ghi chú"}
+                    title={recording ? "Dừng nhập bằng giọng nói" : "Nhập câu hỏi bằng giọng nói"}
                     className="w-9 h-9 rounded-2xl flex items-center justify-center transition-all duration-200"
                     style={
                       recording

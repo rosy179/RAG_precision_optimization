@@ -42,8 +42,6 @@ export const sessionsAPI = {
   create: () => api.post("/api/sessions").then((r) => r.data),
   delete: (id: string) => api.delete(`/api/sessions/${id}`).then((r) => r.data),
   messages: (id: string) => api.get(`/api/sessions/${id}/messages`).then((r) => r.data),
-  chat: (id: string, question: string, history: object[], attachments: string[] = []) =>
-    api.post(`/api/sessions/${id}/chat`, { question, history, attachments }).then((r) => r.data),
   feedback: (messageId: string, rating: "up" | "down" | null) =>
     api.post(`/api/messages/${messageId}/feedback`, { rating }).then((r) => r.data),
 };
@@ -178,6 +176,12 @@ export const documentsAPI = {
     fd.append("url", url);
     fd.append("session_id", sessionId);
     return api.post("/api/documents/upload", fd).then((r) => r.data);
+  },
+  /** Speech-to-text for voice input (fallback when the browser lacks the Web Speech API). */
+  transcribe: (file: File): Promise<{ text: string }> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return api.post("/api/documents/transcribe", fd).then((r) => r.data);
   },
   delete: (id: string) => api.delete(`/api/documents/${id}`).then((r) => r.data),
 };
