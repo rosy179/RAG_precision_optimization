@@ -89,6 +89,19 @@ def _save_suggestions(db2: Session, message_id: str | None,
         db2.rollback()
 
 
+def _save_grounding(db2: Session, message_id: str | None, grounding: dict) -> None:
+    """Persist the grounding-check result so the ✓ badge survives reload."""
+    if not message_id:
+        return
+    try:
+        msg = db2.query(Message).filter(Message.id == message_id).first()
+        if msg:
+            msg.grounding_json = json.dumps(grounding, ensure_ascii=False)
+            db2.commit()
+    except Exception:
+        db2.rollback()
+
+
 def _attached_doc_ids(db: Session, user_id: str, session_id: str,
                       names: list[str]) -> list[str] | None:
     """Resolve attachment names sent with the message to session doc ids so
@@ -163,6 +176,7 @@ def get_messages(
             "feedback":    m.feedback,
             "steps":       json.loads(m.steps_json or "[]"),
             "suggestions": json.loads(m.suggestions_json or "[]"),
+            "grounding":   json.loads(m.grounding_json) if m.grounding_json else None,
             "created_at":  m.created_at.isoformat(),
         }
         for m in session.messages
@@ -245,6 +259,9 @@ def chat_stream(
         t0 = time.time()
         parts: list[str] = []
         sources: list[dict] = []
+        # Full retrieved chunks (with complete text) kept for the grounding
+        # check; `sources` are the truncated UI cards.
+        gen_chunks: list[dict] = []
         steps: list[dict] = []
         complexity = "medium"
         n_hops = 0
@@ -295,6 +312,9 @@ def chat_stream(
                         yield _sse("suggestions", {"questions": hit["suggestions"]})
                         _save_suggestions(db2, ids.get("message_id"),
                                           hit["suggestions"])
+                    if hit.get("grounding"):
+                        yield _sse("grounding", hit["grounding"])
+                        _save_grounding(db2, ids.get("message_id"), hit["grounding"])
                     return
 
             if wants_prev_transform(req.question, req.history):
@@ -390,6 +410,7 @@ def chat_stream(
                     log("error")
                     return
                 sources = ret["sources"]
+                gen_chunks = ret["top_chunks"]
                 complexity = ret["complexity"]
                 yield _sse("meta", {"sources": sources, "complexity": complexity})
 
@@ -421,18 +442,27 @@ def chat_stream(
             # embedding calls would add ~1s each). A client disconnect here
             # only skips the extras; the exchange is already saved above.
             suggestions: list[str] = []
+            grounding: dict | None = None
             if parts and sources and not retrieval_empty:
-                suggestions = rag.suggest_questions(req.question,
-                                                    "".join(parts), sources)
+                answer_text = "".join(parts)
+                suggestions = rag.suggest_questions(req.question, answer_text,
+                                                    sources, usage=usage)
                 if suggestions:
                     yield _sse("suggestions", {"questions": suggestions})
                     _save_suggestions(db2, ids.get("message_id"), suggestions)
+                # Grounding check: verify each cited claim [n] is supported.
+                # Prefer the full chunks; fall back to the truncated cards.
+                grounding = rag.verify_grounding(answer_text, gen_chunks or sources,
+                                                 usage=usage)
+                if grounding:
+                    yield _sse("grounding", grounding)
+                    _save_grounding(db2, ids.get("message_id"), grounding)
             if cacheable and parts and sources and not retrieval_empty:
                 try:
                     rag.cache_store(req.question, session_id,
                                     req.include_doc_ids, req.use_global_kb,
                                     "".join(parts).strip(), sources,
-                                    complexity, steps, suggestions)
+                                    complexity, steps, suggestions, grounding)
                 except Exception:
                     pass
         except GeneratorExit:

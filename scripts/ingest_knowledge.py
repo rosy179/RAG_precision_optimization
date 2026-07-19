@@ -102,10 +102,12 @@ def ingest_corpus_item(kb, item: dict, force: bool) -> tuple[str, int]:
         return "skipped", 0
     doc_type = item.get("source", "corpus")
     doc_id = dp._make_doc_id(title)
-    chunks = dp._sliding_window_chunks(dp._clean_text(item["content"]), doc_id, title, doc_type)
+    # Heading-aware chunking + contextual retrieval + summary, same as the
+    # webapp upload path.
+    chunks, summary = dp._finalize_text_doc(
+        dp._clean_text(item["content"]), doc_id, title, doc_type)
     if not chunks:
         return "empty", 0
-    summary = dp._generate_summary(item["content"][:4000], title)
     for oid in old:
         kb.remove_document(oid)
     kb.add_document(chunks, summary, {"id": doc_id, "name": title, "type": doc_type})

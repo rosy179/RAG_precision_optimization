@@ -13,6 +13,7 @@ Multi-format document ingestion:
 import os
 import re
 import sys
+import json
 import uuid
 import base64
 from pathlib import Path
@@ -25,8 +26,20 @@ if _SRC not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
+from backend.services import llm
+
 CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", 512))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
+
+# Contextual Retrieval (Anthropic-style): at ingest, an LLM writes a short
+# context sentence per chunk ("this chunk covers X of document Y") that is
+# prepended before embedding + BM25 — the ORIGINAL text is still what gets
+# stored/displayed. Toggle off with CONTEXTUAL_RETRIEVAL=0.
+CONTEXTUAL_RETRIEVAL   = os.getenv("CONTEXTUAL_RETRIEVAL", "1") not in ("0", "false", "False", "")
+CONTEXT_MAX_DOC_WORDS  = 8000   # cap words of the doc sent for context generation
+CONTEXT_EXCERPT_WORDS  = 40     # words of each chunk shown in the batch prompt
+
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 AUDIO_EXTENSIONS   = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
 IMAGE_EXTENSIONS   = {".png", ".jpg", ".jpeg", ".webp"}
@@ -38,8 +51,7 @@ ALLOWED_EXTENSIONS = ({".pdf"} | TEXT_EXTENSIONS | OFFICE_EXTENSIONS
 
 
 def _has_api_key() -> bool:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    return bool(api_key) and not api_key.startswith("sk-your")
+    return llm.has_api_key()
 
 
 def _make_doc_id(name: str) -> str:
@@ -49,41 +61,197 @@ def _make_doc_id(name: str) -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _sliding_window_chunks(text: str, doc_id: str, title: str, source_type: str,
-                           page_word_starts: Optional[list[int]] = None) -> list[dict]:
-    """Split text into overlapping word-window chunks.
+_MD_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+?)\s*#*$')
+
+
+def _detect_heading(line: str) -> Optional[tuple[int, str]]:
+    """Classify a line as a heading → (level, title), else None.
+
+    Recognizes Markdown headings (also the '### Slide n' / '### SheetName'
+    markers the DOCX/PPTX/XLSX handlers insert) and short ALL-CAPS lines.
+    Kept deliberately conservative to avoid splitting prose into noise —
+    heading-less documents simply fall back to plain word-window chunking.
+    """
+    s = line.strip()
+    if len(s) < 3 or len(s) > 120:
+        return None
+    m = _MD_HEADING_RE.match(s)
+    if m:
+        return len(m.group(1)), m.group(2).strip()
+    # ALL-CAPS short line (e.g. section banners in plain-text exports)
+    letters = [c for c in s if c.isalpha()]
+    if letters and len(s.split()) <= 10 and sum(c.isupper() for c in letters) / len(letters) > 0.85:
+        return 2, s
+    return None
+
+
+def _page_at(word_idx: int, page_word_starts: Optional[list[int]]) -> Optional[int]:
+    """1-based page whose first word index is the largest ≤ word_idx."""
+    if not page_word_starts:
+        return None
+    page = 1
+    for p, start in enumerate(page_word_starts, 1):
+        if word_idx >= start:
+            page = p
+        else:
+            break
+    return page
+
+
+def _chunk_document(text: str, doc_id: str, title: str, source_type: str,
+                    page_word_starts: Optional[list[int]] = None) -> list[dict]:
+    """Heading-aware overlapping word-window chunker.
+
+    Walks the text line by line, tracking the current heading path (a stack
+    of headings by level). Chunks never straddle a new heading — a section
+    boundary flushes the current window and the next chunk starts clean (no
+    cross-section overlap) — and each chunk is tagged with the `heading` path
+    active at its first word. Within a long section the usual sliding window
+    with CHUNK_OVERLAP applies. Falls back to a single flat window when the
+    document has no detectable headings.
 
     page_word_starts: word index where each page begins (PDFs) — used to tag
-    every chunk with the 1-based page its first word falls on, so the UI can
-    jump straight to that page in the viewer.
+    every chunk with the 1-based page its first word falls on.
     """
-    words = text.split()
+    words: list[str] = []
+    word_heading: list[str] = []      # heading path parallel to `words`
+    boundaries: set[int] = set()      # word indices where a new section starts
+    path: list[tuple[int, str]] = []  # stack of (level, title)
+
+    for line in text.split("\n"):
+        h = _detect_heading(line)
+        if h:
+            level, htitle = h
+            while path and path[-1][0] >= level:
+                path.pop()
+            path.append((level, htitle))
+            boundaries.add(len(words))
+        cur = " > ".join(t for _, t in path)
+        for w in line.split():
+            words.append(w)
+            word_heading.append(cur)
+
     if not words:
         return []
-    chunks = []
-    i = 0
-    idx = 0
+
+    chunks: list[dict] = []
+    i = idx = 0
+    step = max(1, CHUNK_SIZE - CHUNK_OVERLAP)
     while i < len(words):
-        chunk_text = " ".join(words[i: i + CHUNK_SIZE])
+        end = min(i + CHUNK_SIZE, len(words))
+        # Don't cross into a new section: cut at the next heading boundary.
+        next_bound = min((b for b in boundaries if i < b < end), default=None)
+        cut_at_boundary = next_bound is not None
+        if cut_at_boundary:
+            end = next_bound
         chunk = {
-            "id":    f"{doc_id}_c{idx}",
-            "text":  chunk_text,
-            "title": title,
+            "id":     f"{doc_id}_c{idx}",
+            "text":   " ".join(words[i:end]),
+            "title":  title,
             "source": source_type,
             "doc_id": doc_id,
+            "heading": word_heading[i],
         }
-        if page_word_starts:
-            page = 1
-            for p, start in enumerate(page_word_starts, 1):
-                if i >= start:
-                    page = p
-                else:
-                    break
+        page = _page_at(i, page_word_starts)
+        if page is not None:
             chunk["page"] = page
         chunks.append(chunk)
-        i += CHUNK_SIZE - CHUNK_OVERLAP
         idx += 1
+        # Start the next chunk exactly at a section boundary (no overlap
+        # bleeding across sections); otherwise slide with overlap.
+        i = end if cut_at_boundary else (end if end >= len(words) else i + step)
     return chunks
+
+
+# ── Contextual Retrieval (Anthropic-style) ────────────────
+
+def contextual_text(chunk: dict) -> str:
+    """Text used for EMBEDDING and BM25: the generated context sentence
+    prepended to the original chunk text. The original `text` is what stays
+    stored/displayed — this is only the retrieval representation."""
+    ctx = chunk.get("context")
+    return f"{ctx}\n\n{chunk['text']}" if ctx else chunk["text"]
+
+
+def _fallback_context(title: str, heading: str) -> str:
+    """Deterministic context when the LLM is unavailable or misaligns —
+    still situates the chunk by document + section for retrieval."""
+    if heading:
+        return f"Trích từ mục \"{heading}\" của tài liệu \"{title}\"."
+    return f"Trích từ tài liệu \"{title}\"."
+
+
+# English instruction (kept language-neutral on purpose): a Vietnamese system
+# prompt biased gpt-4o-mini into writing Vietnamese context for English
+# documents, mixing languages inside one embedding. The context must be in the
+# document's OWN language so it aligns cleanly with same-language chunk text.
+_CONTEXT_SYSTEM_PROMPT = (
+    "You situate each text chunk within its source document to improve search "
+    "retrieval. Reply strictly in the requested JSON format."
+)
+
+
+def _generate_contexts(title: str, full_text: str, chunks: list[dict]) -> Optional[list[str]]:
+    """One LLM call situating every chunk of a document (Anthropic Contextual
+    Retrieval, batched per document to keep cost/latency low — the document is
+    sent once, each chunk only as a short excerpt). Returns a context per
+    chunk, or None on any failure/misalignment so the caller can fall back."""
+    if not _has_api_key():
+        return None
+    doc = " ".join(full_text.split()[:CONTEXT_MAX_DOC_WORDS])
+    listing = "\n".join(
+        f"[{i}] " + (f"(section: {c['heading']}) " if c.get("heading") else "")
+        + " ".join(c["text"].split()[:CONTEXT_EXCERPT_WORDS])
+        for i, c in enumerate(chunks, 1)
+    )
+    n = len(chunks)
+    user = (
+        f"<document title=\"{title}\">\n{doc}\n</document>\n\n"
+        f"The document above is split into {n} chunks. For EACH chunk, write ONE "
+        f"short sentence (max 25 words) stating which section/topic of the "
+        f"document it covers and its key entities/concepts, to improve search. "
+        f"Write each context in the SAME LANGUAGE as the document text.\n\n"
+        f"Chunks:\n{listing}\n\n"
+        f"Return JSON: {{\"contexts\": [\"...\"]}} with EXACTLY {n} items in order."
+    )
+    try:
+        client = llm.get_client()
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
+                      {"role": "user", "content": user}],
+            temperature=0.0,
+            max_tokens=min(2000, 80 + 45 * n),
+            response_format={"type": "json_object"},
+        )
+        arr = json.loads(resp.choices[0].message.content or "{}").get("contexts")
+        if isinstance(arr, list) and len(arr) == n:
+            return [str(x).strip() for x in arr]
+    except Exception:
+        pass
+    return None
+
+
+def _apply_contextual_retrieval(title: str, full_text: str, chunks: list[dict]) -> None:
+    """Attach a `context` sentence to each chunk (in place). Skipped when the
+    feature is off or the document is a single chunk (nothing to situate)."""
+    if not CONTEXTUAL_RETRIEVAL or len(chunks) <= 1:
+        return
+    generated = _generate_contexts(title, full_text, chunks)
+    for i, c in enumerate(chunks):
+        ctx = generated[i] if generated and generated[i] else _fallback_context(title, c.get("heading", ""))
+        if ctx:
+            c["context"] = ctx
+
+
+def _finalize_text_doc(full_text: str, doc_id: str, title: str, source_type: str,
+                       page_word_starts: Optional[list[int]] = None) -> tuple[list[dict], str]:
+    """Shared tail for text-bearing documents: heading-aware chunking →
+    contextual retrieval → hierarchical summary. Returns (chunks, summary)."""
+    chunks = _chunk_document(full_text, doc_id, title, source_type, page_word_starts)
+    _apply_contextual_retrieval(title, full_text, chunks)
+    summary = _generate_summary(full_text[:4000], title)
+    return chunks, summary
 
 
 def reconstruct_from_chunks(chunk_texts: list[str]) -> tuple[str, list[tuple[int, int]]]:
@@ -161,19 +329,18 @@ def process_pdf(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
             page_texts[pnum] = text
 
     # Tag each chunk with the 1-based page its first word starts on, so the
-    # viewer can jump straight there.
+    # viewer can jump straight there. Headings live line by line, so keep the
+    # newlines between pages for the heading-aware chunker to see.
     page_word_starts: list[int] = []
     words: list[str] = []
     for t in page_texts:
         page_word_starts.append(len(words))
         words.extend(t.split())
 
-    full_text = " ".join(words)
+    full_text = "\n".join(t for t in page_texts if t)
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(full_text, doc_id, filename, "pdf",
-                                    page_word_starts=page_word_starts)
-    summary = _generate_summary(full_text[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(full_text, doc_id, filename, "pdf",
+                              page_word_starts=page_word_starts)
 
 
 def _ocr_pdf_pages(file_bytes: bytes, page_indices: list[int],
@@ -334,9 +501,7 @@ def process_url(url: str) -> tuple[list[dict], str]:
         raise ValueError("Trang không có nội dung văn bản đọc được (có thể nội dung được render bằng JavaScript)")
 
     doc_id = _make_doc_id(url)
-    chunks = _sliding_window_chunks(text, doc_id, title, "url")
-    summary = _generate_summary(text[:4000], title)
-    return chunks, summary
+    return _finalize_text_doc(text, doc_id, title, "url")
 
 
 _VISION_DESCRIBE_PROMPT = (
@@ -356,9 +521,8 @@ def _vision_call(image_bytes: bytes, mime: str, prompt: str,
                  max_tokens: int = 1000) -> str:
     """One GPT-4o Vision call over an inline base64 image. Callers must
     ensure an API key exists (_has_api_key)."""
-    from openai import OpenAI
     b64 = base64.b64encode(image_bytes).decode()
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+    client = llm.get_client()
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": [
@@ -384,18 +548,18 @@ def process_image(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
         description = _vision_call(file_bytes, mime, _VISION_DESCRIBE_PROMPT)
 
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(description, doc_id, filename, "image")
+    # A vision description is already a whole-document blob — no heading
+    # structure and nothing to situate, so no contextual retrieval here.
+    chunks = _chunk_document(description, doc_id, filename, "image")
     summary = description[:500]
     return chunks, summary
 
 
 def transcribe_audio(file_bytes: bytes, filename: str) -> str:
     """Whisper speech-to-text; mock text when no API key is configured."""
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key or api_key.startswith("sk-your"):
+    if llm.is_mock():
         return f"[MOCK] Audio transcription for {filename}"
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+    client = llm.get_client()
     resp = client.audio.transcriptions.create(
         model="whisper-1",
         file=(filename, file_bytes),
@@ -406,18 +570,14 @@ def transcribe_audio(file_bytes: bytes, filename: str) -> str:
 def process_audio(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     transcript = _clean_text(transcribe_audio(file_bytes, filename))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(transcript, doc_id, filename, "audio")
-    summary = _generate_summary(transcript[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(transcript, doc_id, filename, "audio")
 
 
 def process_txt(file_bytes: bytes, filename: str,
                 source_type: str = "txt") -> tuple[list[dict], str]:
     text = _clean_text(file_bytes.decode("utf-8", errors="replace"))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(text, doc_id, filename, source_type)
-    summary = _generate_summary(text[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(text, doc_id, filename, source_type)
 
 
 def process_docx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
@@ -437,9 +597,7 @@ def process_docx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
 
     text = _clean_text("\n".join(parts))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(text, doc_id, filename, "docx")
-    summary = _generate_summary(text[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(text, doc_id, filename, "docx")
 
 
 def process_pptx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
@@ -464,9 +622,7 @@ def process_pptx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
 
     text = _clean_text("\n".join(parts))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(text, doc_id, filename, "pptx")
-    summary = _generate_summary(text[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(text, doc_id, filename, "pptx")
 
 
 def process_xlsx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
@@ -487,9 +643,7 @@ def process_xlsx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
 
     text = _clean_text("\n".join(parts))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(text, doc_id, filename, "xlsx")
-    summary = _generate_summary(text[:4000], filename)
-    return chunks, summary
+    return _finalize_text_doc(text, doc_id, filename, "xlsx")
 
 
 def process_file(file_bytes: bytes, filename: str,
@@ -530,14 +684,12 @@ def process_file(file_bytes: bytes, filename: str,
 
 def _generate_summary(text: str, title: str) -> str:
     """Generate a short summary for hierarchical indexing."""
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key or api_key.startswith("sk-your"):
+    if llm.is_mock():
         return text[:300]
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+    client = llm.get_client()
     try:
         resp = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": (
                 f"Summarize this document in 3-5 sentences for a technical search index. "
                 f"Document title: {title}\n\n{text}"

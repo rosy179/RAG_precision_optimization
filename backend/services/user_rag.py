@@ -9,7 +9,6 @@ import os
 import re
 import sys
 import json
-import math
 import time
 import hashlib
 import logging
@@ -31,8 +30,24 @@ from sentence_transformers import CrossEncoder
 from dotenv import load_dotenv
 load_dotenv()
 
+from backend.services import llm
 from backend.services.embeddings import get_embedding_function
+from backend.services.document_processor import contextual_text
 from backend.services.global_kb import get_kb
+from backend.services.prompts import (
+    CHAT_SYSTEM_PROMPT, CONDENSE_PROMPT, GROUNDING_PROMPT, SUGGEST_PROMPT,
+    TRANSFORM_SYSTEM_PROMPT,
+)
+from backend.services.intent import (
+    is_summary_question, wants_prev_transform, lang_directive as _lang_directive,
+    _SUMMARY_INTENT_RE, _DOC_REF_RE,
+)
+from backend.services.rag_helpers import (
+    tokenize as _tokenize, add_usage as _add_usage, cosine as _cosine,
+    merge_lexical as _merge_lexical, reattach_chunk_fields as _reattach_chunk_fields,
+    chunks_to_sources as _chunks_to_sources, display_score as _display_score,
+)
+from backend.services.multihop import MultihopMixin
 
 log = logging.getLogger("rag.user")
 
@@ -52,148 +67,6 @@ RERANKER_MAX_LEN = 512  # chunks are ~512 tokens; caps CPU latency per pair
 ANSWER_CACHE_TTL_S = 3600
 ANSWER_CACHE_MAX   = 50
 ANSWER_CACHE_SIM   = 0.95  # cosine threshold for a semantic hit
-
-# System prompt for the chat UI. Unlike the eval pipeline (cot_rag.py, tuned
-# for short Ragas-scored answers), chat answers must be structured Markdown.
-CHAT_SYSTEM_PROMPT = """\
-Bạn là trợ lý tri thức IT, trả lời câu hỏi dựa trên tài liệu người dùng đã cung cấp.
-
-NGUYÊN TẮC NỘI DUNG:
-1. Chỉ dùng thông tin từ phần "Ngữ cảnh" và lịch sử hội thoại — tuyệt đối không bịa thêm ngoài hai nguồn đó.
-2. Với yêu cầu trình bày lại nội dung đã trả lời trước đó (dịch sang ngôn ngữ khác, tóm tắt, rút gọn, đổi định dạng), hãy THỰC HIỆN dựa trên câu trả lời trước trong lịch sử hội thoại và ngữ cảnh — không được từ chối vì lý do "chỉ dùng ngữ cảnh".
-3. Nếu ngữ cảnh không đủ để trả lời trọn vẹn, trả lời phần có thể và nói rõ phần nào còn thiếu thông tin.
-4. Khách quan và chính xác: giữ nguyên số liệu, tên riêng, thuật ngữ trong tài liệu; giải thích ngắn gọn thuật ngữ khó.
-4b. Khi NHIỀU đoạn ngữ cảnh chứa dữ kiện có vẻ cùng trả lời câu hỏi (ví dụ nhiều mốc năm, nhiều tên chương trình), hãy đối chiếu từng dữ kiện với ĐÚNG chủ thể và phạm vi của câu hỏi (toàn tổ chức ≠ một đơn vị con; "đầu tiên/bắt đầu" = mốc sớm nhất) rồi chọn dữ kiện khớp trực tiếp nhất; nếu vẫn mơ hồ, nêu cả hai và giải thích khác biệt.
-5. Ngôn ngữ trả lời: nếu người dùng yêu cầu ngôn ngữ cụ thể (ví dụ "bằng tiếng Nhật") thì dùng đúng ngôn ngữ đó; nếu không, trả lời bằng ngôn ngữ của câu hỏi.
-
-ĐỊNH DẠNG BẮT BUỘC (Markdown):
-- Mở đầu bằng 1-2 câu trả lời thẳng vào ý chính của câu hỏi.
-- Triển khai chi tiết bằng gạch đầu dòng "- ", mỗi ý một dòng, in đậm **từ khóa** ở đầu mỗi ý.
-- Nếu câu trả lời có nhiều khía cạnh, chia mục bằng tiêu đề "### ".
-- Dùng danh sách đánh số (1. 2. 3.) cho các bước hoặc quy trình.
-- Dùng bảng Markdown khi cần so sánh từ 2 đối tượng trở lên.
-- Không bao giờ dồn toàn bộ câu trả lời vào một dòng hay một đoạn văn duy nhất.
-
-TRÍCH DẪN NGUỒN (bắt buộc):
-- Mỗi đoạn "Ngữ cảnh" được đánh số dạng [Nguồn 1: tên], [Nguồn 2: tên]...
-- Khi một ý lấy từ nguồn nào, chèn chỉ số [1], [2]... ngay sau ý đó (trước dấu chấm câu hoặc cuối gạch đầu dòng). Ví dụ: "- **RAG** kết hợp truy xuất và sinh văn bản [1]."
-- Một ý tổng hợp từ nhiều nguồn thì ghi liền các chỉ số: [1][3].
-- Chỉ dùng số nguồn có thật trong Ngữ cảnh; không chèn chỉ số cho ý lấy từ lịch sử hội thoại hay kiến thức chung."""
-
-# Router + decomposer for Multi-Hop RAG: only invoked for heuristically
-# complex questions, so simple lookups pay zero extra latency.
-MULTIHOP_ROUTE_PROMPT = """\
-Bạn là bộ định tuyến truy vấn cho hệ thống RAG. Câu hỏi CẦN multi-hop khi phải \
-tìm một thực thể/dữ kiện trung gian trước, rồi mới dùng nó để tìm tiếp câu trả lời \
-(ví dụ: "Ai nhận giải X cho công trình đứng sau hệ thống Y?" — phải tìm "công trình \
-đứng sau Y" trước).
-
-Nếu câu hỏi trả lời được bằng MỘT lần tìm kiếm (kể cả câu so sánh/giải thích thông \
-thường), trả về đúng một từ: SINGLE
-
-Nếu cần multi-hop, trả về 2-3 truy vấn con theo thứ tự, mỗi truy vấn một dòng, \
-không đánh số, không giải thích. Truy vấn sau được phép tham chiếu kết quả của \
-truy vấn trước. Dùng cùng ngôn ngữ với câu hỏi.
-
-Câu hỏi: {question}"""
-
-MULTIHOP_HOP_PROMPT = """\
-Bạn là trợ lý chính xác. Trả lời truy vấn con CHỈ dựa trên ngữ cảnh dưới đây.
-Nếu ngữ cảnh không chứa câu trả lời, trả về đúng: NOT FOUND
-Trả lời NGẮN GỌN (tối đa 2 câu), giữ nguyên tên riêng/số liệu, cùng ngôn ngữ với truy vấn.
-
-Ngữ cảnh:
-{context}
-
-Truy vấn con: {sub_question}
-
-Trả lời ngắn:"""
-
-# Follow-up condensing — "dịch sang tiếng Nhật", "nói rõ hơn ý 2" carry no
-# retrieval signal, so they are rewritten standalone using the history.
-# (The old English-translation step is gone: BGE-M3 embeddings and the
-# multilingual cross-encoder (RERANKER) score VI/JA queries against the EN
-# corpus directly, saving one LLM round-trip per non-English question.)
-CONDENSE_PROMPT = """\
-Bạn nhận lịch sử hội thoại và một câu hỏi mới. Viết lại câu hỏi thành MỘT câu \
-truy vấn tìm kiếm độc lập, nêu rõ chủ đề đang nói tới (dựa vào lịch sử nếu câu \
-hỏi phụ thuộc ngữ cảnh; nếu đã độc lập và rõ ràng thì giữ NGUYÊN VĂN). Bỏ các \
-yêu cầu về cách trình bày (ví dụ: "dịch sang tiếng Nhật", "tóm tắt lại", "viết \
-ngắn hơn") — chỉ giữ chủ đề nội dung, giữ ngôn ngữ gốc. Chỉ trả về câu truy vấn \
-duy nhất, không giải thích."""
-
-# "Summarize this link/document"-type questions carry no topical signal —
-# similarity search returns noise for them (often unrelated global-KB chunks).
-# They are detected here and served by reading the target document directly.
-_SUMMARY_INTENT_RE = re.compile(
-    r"tóm\s*tắt|tóm\s*lược|nội\s*dung\s*(chính|của|có|trong|ở)|ý\s*chính|"
-    r"điểm\s*chính|nói\s*(về\s*)?(gì|cái\s*gì|điều\s*gì)|viết\s*về\s*gì|"
-    r"đề\s*cập\s*(đến|tới)?\s*gì|giới\s*thiệu\s*gì|"
-    r"summar(y|ize|ise)|tl;?dr|main\s+(points?|ideas?|content)|"
-    r"key\s+(points?|takeaways?)|what\s+is\s+(it|this|the\s+\w+)\s+about|"
-    r"\boverview\b|\bgist\b", re.IGNORECASE)
-
-# Mentions of an attached-document object ("đường link", "bài viết", "file"…)
-# used to pick a digest target when the message has no attachment of its own.
-_DOC_REF_RE = re.compile(
-    r"https?://|đường\s*link|\blink\b|\burl\b|bài\s*(viết|báo|blog)|"
-    r"trang\s*web|tài\s*liệu|văn\s*bản|tệp|\bfile\b|\bpdf\b|hình\s*ảnh|"
-    r"bản\s*ghi\s*âm|article|\bpage\b|document|\bblog\b|\bpost\b|website|"
-    r"recording|image|picture", re.IGNORECASE)
-
-
-def is_summary_question(question: str) -> bool:
-    """True for topically-empty summarize/what-is-it-about questions."""
-    return bool(_SUMMARY_INTENT_RE.search(question))
-
-
-# "Dịch bản tóm tắt đó sang tiếng Nhật"-type requests transform the PREVIOUS
-# answer — retrieval has nothing to add and its strict grounded-only prompt
-# makes the model refuse. They are served by a dedicated transform path.
-_LANG_PHRASE_RE = re.compile(
-    r"(sang|ra|qua|bằng|thành)\s+tiếng\s+\w+|\btranslate\b|"
-    r"\b(in|into|to)\s+(japanese|english|vietnamese|chinese|korean|french|german|spanish)\b|"
-    r"日本語|英語|ベトナム語", re.IGNORECASE)
-# Starts as an imperative transform command…
-_TRANSFORM_CMD_RE = re.compile(
-    r"^\s*(hãy|vui\s*lòng|làm\s*ơn|please)?\s*(dịch|chuyển|translate|viết\s*lại|đổi)\b",
-    re.IGNORECASE)
-# …or explicitly points back at the previous output
-_PREV_OUTPUT_RE = re.compile(
-    r"(bản|câu|phần|nội\s*dung|đoạn)\s*(tóm\s*tắt|trả\s*lời|tổng\s*hợp|dịch)?\s*"
-    r"(đó|này|trên|vừa\s*rồi|ở\s*trên)|câu\s*trả\s*lời|"
-    r"the\s+(answer|summary|response)|\babove\b", re.IGNORECASE)
-
-
-def wants_prev_transform(question: str, history: list[dict] | None) -> bool:
-    """True when the question asks to re-render the previous answer in
-    another language/format rather than asking something new."""
-    prev = next((m for m in reversed(history or [])
-                 if m.get("role") == "assistant" and m.get("content")), None)
-    if prev is None or not _LANG_PHRASE_RE.search(question):
-        return False
-    return bool(_TRANSFORM_CMD_RE.match(question) or _PREV_OUTPUT_RE.search(question))
-
-
-TRANSFORM_SYSTEM_PROMPT = """\
-Bạn nhận "Câu trả lời trước" của trợ lý và một yêu cầu trình bày lại nó \
-(dịch sang ngôn ngữ khác, rút gọn, đổi định dạng...).
-- Thực hiện đúng yêu cầu trên TOÀN BỘ câu trả lời trước, không bỏ sót ý.
-- Giữ nguyên cấu trúc Markdown (tiêu đề, gạch đầu dòng, bảng), số liệu và các chỉ số trích dẫn [1], [2]...
-- Khi dịch: giữ nguyên tên riêng, tên sản phẩm và thuật ngữ kỹ thuật thông dụng; phần còn lại dịch tự nhiên, trôi chảy.
-- Chỉ trả về kết quả, không thêm lời giải thích hay lời dẫn."""
-
-# Suggested follow-up questions (ChatPDF/NotebookLM-style chips under the
-# answer). Suggestions must be answerable from the SHOWN sources — a chip
-# that retrieval can't back produces a bad answer on click.
-SUGGEST_PROMPT = """\
-Bạn nhận câu hỏi của người dùng, câu trả lời của trợ lý và danh sách nguồn tài liệu.
-Đề xuất đúng 3 câu hỏi tiếp theo ngắn gọn (mỗi câu tối đa 15 từ) mà người dùng \
-có thể muốn hỏi tiếp:
-- Chỉ hỏi điều trả lời được từ các nguồn tài liệu đã cho — không hỏi ngoài phạm vi.
-- Không lặp lại câu đã hỏi; đào sâu chi tiết, khía cạnh liên quan hoặc so sánh.
-- Dùng cùng ngôn ngữ với câu hỏi gốc.
-Chỉ trả về JSON: {"questions": ["...", "...", "..."]}"""
 
 
 # Shared reranker (loaded once at startup)
@@ -236,125 +109,14 @@ def get_service(user_id: str) -> "UserRAGService":
     return svc
 
 
-def _tokenize(text: str) -> list:
-    return re.findall(r'\w+', text.lower())
-
-
-def _add_usage(usage: dict | None, res) -> None:
-    """Accumulate real token usage from an OpenAI response (or streaming
-    chunk carrying `.usage`) into the caller's accumulator dict — replaces
-    the dashboard's rough cost estimates whenever available."""
-    u = getattr(res, "usage", None)
-    if usage is None or u is None:
-        return
-    usage["in"] = usage.get("in", 0) + (u.prompt_tokens or 0)
-    usage["out"] = usage.get("out", 0) + (u.completion_tokens or 0)
-    usage["real"] = True
-
-
-def _cosine(a, b) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
-def _merge_lexical(session_hits: list[dict], global_hits: list[dict], n: int = 20) -> list[dict]:
-    """Merge BM25 results from the session corpus and the global KB.
-
-    Raw BM25 scores are not comparable across corpora (different IDF
-    statistics), so normalize each list by its own max before merging.
-    RRF downstream only consumes ranks, so this just needs to produce a
-    fair combined ordering.
-    """
-    merged: list[dict] = []
-    for hits in (session_hits, global_hits):
-        if hits:
-            mx = max(h["score"] for h in hits) or 1.0
-            merged.extend({**h, "score": round(h["score"] / mx, 4)} for h in hits)
-    merged.sort(key=lambda h: h["score"], reverse=True)
-    return merged[:n]
-
-
-def _reattach_chunk_fields(fused: list[dict], *source_lists: list[dict]):
-    """RRF (hybrid_rag.reciprocal_rank_fusion) rebuilds chunk dicts and drops
-    score/doc_id/scope — re-attach them so the HyDE low-score fallback and
-    the per-source scope badge keep working."""
-    by_id: dict[str, dict] = {}
-    for chunks in source_lists:  # later lists win (semantic cosine score preferred)
-        for c in chunks:
-            by_id[c["id"]] = c
-    for c in fused:
-        orig = by_id.get(c["id"], {})
-        for key in ("score", "doc_id", "scope", "page"):
-            if key in orig:
-                c.setdefault(key, orig[key])
-
-
-# The Vietnamese system prompt biases gpt-4o-mini toward Vietnamese answers
-# regardless of the question's language — pin the answer language explicitly.
-_JA_RE = re.compile(r'[぀-ヿㇰ-ㇿｦ-ﾟ一-鿿]')
-_VI_RE = re.compile(
-    r'[àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợ'
-    r'ùúủũụưừứửữựỳýỷỹỵ]', re.IGNORECASE)
-
-
-def _lang_directive(question: str) -> str:
-    """Explicit answer-language instruction based on the question's language.
-    Uses the first non-empty line so multi-hop scaffolding (Vietnamese framing
-    text appended below the question) can't skew detection."""
-    head = next((l for l in question.splitlines() if l.strip()), question)
-    if _JA_RE.search(head):
-        return ("QUAN TRỌNG: Câu hỏi bằng tiếng Nhật — toàn bộ câu trả lời phải bằng "
-                "tiếng Nhật (回答はすべて日本語で書いてください), trừ khi người dùng "
-                "yêu cầu rõ một ngôn ngữ khác.")
-    if _VI_RE.search(head):
-        return ("QUAN TRỌNG: Trả lời hoàn toàn bằng tiếng Việt, trừ khi người dùng "
-                "yêu cầu rõ một ngôn ngữ khác.")
-    return ("IMPORTANT: The question is in English — write the ENTIRE answer in "
-            "English, unless the user explicitly asked for another language.")
-
-
-def _chunks_to_sources(chunks: list[dict]) -> list[dict]:
-    """UI-ready source cards for a list of retrieved chunks."""
-    return [{
-        "rank":     c.get("rank", i + 1),
-        "title":    c.get("title", "Unknown"),
-        "snippet":  c.get("text", "")[:300],
-        "score":    _display_score(c),
-        "scope":    c.get("scope", "session"),  # "global" = shared KB
-        "doc_id":   c.get("doc_id", ""),
-        "chunk_id": c.get("id", ""),
-        **({"page": c["page"]} if c.get("page") else {}),
-    } for i, c in enumerate(chunks)]
-
-
-def _display_score(chunk: dict) -> float:
-    """Normalize a chunk's relevance score to 0-1 for the UI badge.
-
-    Depending on the model config, sentence-transformers ≥4 returns rerank
-    scores either sigmoid-activated in [0, 1] (bge-reranker-v2-m3) or as
-    raw unbounded logits (mmarco-mMiniLMv2) — squash only the latter.
-    Semantic scores (1 - distance) can dip below 0 depending on the
-    distance metric, so clamp instead.
-    """
-    if "rerank_score" in chunk:
-        s = chunk["rerank_score"]
-        if not 0.0 <= s <= 1.0:
-            s = 1.0 / (1.0 + math.exp(-s))
-        return round(s, 4)
-    return round(max(0.0, min(1.0, chunk.get("score", 0.0))), 4)
-
-
 def generate_session_title(question: str, answer: str = "") -> str:
     """Short LLM-generated conversation title; falls back to a truncated
     question in mock mode or on any API failure."""
     fallback = question[:60] + ("…" if len(question) > 60 else "")
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key or api_key.startswith("sk-your"):
+    if llm.is_mock():
         return fallback
     try:
-        client = openai.OpenAI(api_key=api_key)
+        client = llm.get_client()
         res = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": (
@@ -381,10 +143,9 @@ def openai_error_detail(e: openai.APIError) -> str:
     return f"Lỗi kết nối OpenAI: {e.message if hasattr(e, 'message') else str(e)}"
 
 
-class UserRAGService:
+class UserRAGService(MultihopMixin):
     def __init__(self, user_id: str):
-        self._uid   = user_id
-        self._api_key = os.getenv("OPENAI_API_KEY", "")
+        self._uid = user_id
 
         DB_PATH.mkdir(parents=True, exist_ok=True)
         self._chroma = chromadb.PersistentClient(path=str(DB_PATH))
@@ -425,6 +186,14 @@ class UserRAGService:
 
     # ── Ingestion ──────────────────────────────────────────
 
+    @staticmethod
+    def _contextual_embeddings(chunks: list[dict]) -> Optional[list]:
+        """Precomputed embeddings of the context-prefixed text, or None when
+        no chunk has a context (let Chroma embed the plain `documents`)."""
+        if not any(c.get("context") for c in chunks):
+            return None
+        return list(get_embedding_function()([contextual_text(c) for c in chunks]))
+
     def add_document(self, chunks: list[dict], doc_summary: str, doc_meta: dict) -> int:
         """Upsert chunks + summary into ChromaDB and rebuild BM25."""
         if not chunks:
@@ -436,11 +205,17 @@ class UserRAGService:
         # (the deictic digest fallback picks the most recently added doc).
         added_at = time.time()
 
+        # Contextual Retrieval: embed the context-prefixed text but store the
+        # original (see GlobalKBService for the full rationale). None → Chroma
+        # embeds the plain documents.
+        embeddings = self._contextual_embeddings(chunks)
+
         # Upsert chunks into chunk collection (page only exists for PDFs —
         # Chroma metadata rejects None values, so include it conditionally)
         self._chunk_col.upsert(
             ids=[c["id"] for c in chunks],
             documents=[c["text"] for c in chunks],
+            embeddings=embeddings,
             metadatas=[{
                 "doc_id": doc_id,
                 "session_id": session_id,
@@ -448,6 +223,8 @@ class UserRAGService:
                 "source": doc_meta.get("type", "unknown"),
                 "chunk_index": i,
                 "added_at": added_at,
+                "context": c.get("context", ""),
+                "heading": c.get("heading", ""),
                 **({"page": c["page"]} if "page" in c else {}),
             } for i, c in enumerate(chunks)],
         )
@@ -465,7 +242,8 @@ class UserRAGService:
         new_entries = [{"id": c["id"], "text": c["text"],
                         "title": doc_meta["name"], "doc_id": doc_id,
                         "session_id": session_id,
-                        "tokens": _tokenize(c["text"]),
+                        "heading": c.get("heading", ""),
+                        "tokens": _tokenize(contextual_text(c)),
                         **({"page": c["page"]} if "page" in c else {})}
                        for c in chunks]
         with self._lock:
@@ -783,7 +561,7 @@ class UserRAGService:
         openai.APIError propagates to the caller so the endpoint can emit
         an SSE error event.
         """
-        if not self._api_key or self._api_key.startswith("sk-your"):
+        if llm.is_mock():
             preview = chunks[0]["text"][:200] if chunks else "No context"
             # Chunked mock so the UI streaming path is exercised without a key
             mock = f"[MOCK ANSWER] Based on context: '{preview}...'"
@@ -791,7 +569,7 @@ class UserRAGService:
                 yield mock[i:i + 24]
             return
 
-        client = openai.OpenAI(api_key=self._api_key)
+        client = llm.get_client()
         stream = client.chat.completions.create(
             model=LLM_MODEL,
             messages=self._chat_messages(question, chunks, history or []),
@@ -809,13 +587,13 @@ class UserRAGService:
                          usage: dict | None = None):
         """Yield the previous answer re-rendered per the user's instruction
         (translate, shorten, reformat) — no retrieval involved."""
-        if not self._api_key or self._api_key.startswith("sk-your"):
+        if llm.is_mock():
             mock = f"[MOCK TRANSFORM] {question}: {prev_answer[:200]}"
             for i in range(0, len(mock), 24):
                 yield mock[i:i + 24]
             return
 
-        client = openai.OpenAI(api_key=self._api_key)
+        client = llm.get_client()
         stream = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -844,14 +622,14 @@ class UserRAGService:
         """
         if not sources:
             return []
-        if not self._api_key or self._api_key.startswith("sk-your"):
+        if llm.is_mock():
             return ["Chủ đề này có những ứng dụng nào?",
                     "Có hạn chế hay nhược điểm gì không?",
                     "So sánh với các phương pháp tương tự?"]
         context = "\n".join(f"- {s.get('title', '')}: {s.get('snippet', '')}"
                             for s in sources[:5])
         try:
-            client = openai.OpenAI(api_key=self._api_key)
+            client = llm.get_client()
             res = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
@@ -871,6 +649,50 @@ class UserRAGService:
         except Exception:
             return []
 
+    def verify_grounding(self, answer: str, chunks: list[dict],
+                         usage: dict | None = None) -> dict | None:
+        """Check that every cited claim [n] in the answer is supported by
+        source n (online Faithfulness). One cheap LLM call, run AFTER the
+        answer is streamed. Returns {"total", "verified", "unsupported"[]},
+        or None when there is nothing to verify (no citations) or on failure.
+        """
+        # Cheap gate: no citation markers → nothing to verify.
+        if not chunks or not re.search(r"\[\d+\]", answer):
+            return None
+        if llm.is_mock():
+            return {"total": 1, "verified": 1, "unsupported": []}  # mock: all good
+        # Accept either full chunks (`text`) or UI source cards (`snippet`).
+        context = "\n\n---\n\n".join(
+            f"[Nguồn {c.get('rank', i + 1)}: {c.get('title', '')}]\n"
+            f"{c.get('text') or c.get('snippet', '')}"
+            for i, c in enumerate(chunks)
+        )
+        try:
+            client = llm.get_client()
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": GROUNDING_PROMPT},
+                    {"role": "user", "content":
+                        f"Nguồn:\n{context}\n\nCâu trả lời:\n{answer}"},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                response_format={"type": "json_object"},
+            )
+            _add_usage(usage, res)
+            data = json.loads(res.choices[0].message.content or "{}")
+            total = int(data.get("total", 0) or 0)
+            unsupported = [str(u).strip() for u in data.get("unsupported", [])
+                           if str(u).strip()]
+            if total <= 0:
+                return None
+            # Guard against a model that lists more failures than claims.
+            verified = max(0, total - len(unsupported))
+            return {"total": total, "verified": verified, "unsupported": unsupported}
+        except Exception:
+            return None
+
     # ── Multi-Hop (Layer 6) ────────────────────────────────
 
     def has_any_source(self, session_id: str | None = None,
@@ -884,125 +706,6 @@ class UserRAGService:
             chunks = [c for c in chunks if c.get("doc_id") in allowed]
         return bool(chunks) or (use_global_kb and not get_kb().is_empty())
 
-    def route_multihop(self, question: str,
-                       usage: dict | None = None) -> list[str]:
-        """Decide whether the question needs chained retrieval.
-
-        Returns ordered sub-queries (2-3) for multi-hop, or [] for the
-        normal single-retrieval path. Callers should only invoke this for
-        heuristically complex questions to keep simple lookups fast.
-        """
-        if not self._api_key or self._api_key.startswith("sk-your"):
-            return []
-        try:
-            client = openai.OpenAI(api_key=self._api_key)
-            res = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[{"role": "user",
-                           "content": MULTIHOP_ROUTE_PROMPT.format(question=question)}],
-                temperature=0.0,
-                max_tokens=200,
-            )
-            _add_usage(usage, res)
-            raw = (res.choices[0].message.content or "").strip()
-        except Exception:
-            return []
-        if not raw or raw.upper().startswith("SINGLE"):
-            return []
-        subs = [line.strip().lstrip("0123456789.-) ").strip()
-                for line in raw.splitlines() if line.strip()]
-        subs = [s for s in subs if len(s) > 5]
-        # A single sub-question is just a rephrase — not worth the extra hops
-        return subs[:3] if len(subs) >= 2 else []
-
-    def _hop_answer(self, sub_question: str, chunks: list[dict],
-                    usage: dict | None = None) -> str:
-        """Short bridging answer for one hop (feeds the next hop's query)."""
-        if not chunks:
-            return "NOT FOUND"
-        if not self._api_key or self._api_key.startswith("sk-your"):
-            return chunks[0]["text"][:200]
-        context = "\n\n---\n\n".join(
-            f"[Nguồn {c.get('rank', i + 1)}: {c.get('title', '')}]\n{c['text']}"
-            for i, c in enumerate(chunks)
-        )
-        try:
-            client = openai.OpenAI(api_key=self._api_key)
-            res = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[{"role": "user", "content": MULTIHOP_HOP_PROMPT.format(
-                    context=context, sub_question=sub_question)}],
-                temperature=0.0,
-                max_tokens=150,
-            )
-            _add_usage(usage, res)
-            return (res.choices[0].message.content or "").strip() or "NOT FOUND"
-        except Exception:
-            return "NOT FOUND"
-
-    def multihop_events(self, question: str, sub_questions: list[str],
-                        history: list[dict] | None = None,
-                        session_id: str | None = None,
-                        include_doc_ids: list[str] | None = None,
-                        use_global_kb: bool = True,
-                        attached_doc_ids: list[str] | None = None,
-                        usage: dict | None = None):
-        """Chained-retrieval pipeline as an event generator.
-
-        Yields ("step", dict) for each reasoning step, then
-        ("sources", {"sources": [...]}) with the deduplicated union of all
-        hops' chunks, then ("delta", str) tokens of the final answer.
-        """
-        history = history or []
-        bridge: list[dict] = []
-        all_chunks: list[dict] = []
-
-        for i, sub_q in enumerate(sub_questions, 1):
-            # Facts found so far steer the next retrieval — this is the
-            # whole point of multi-hop: the bridging entity was never in
-            # the original question.
-            established = " | ".join(
-                f"[Đã biết: {b['answer']}]" for b in bridge
-                if b["answer"] and "NOT FOUND" not in b["answer"]
-            )
-            enriched = f"{sub_q} ({established})" if established else sub_q
-            yield ("step", {"stage": "hop_start", "hop": i,
-                            "total": len(sub_questions), "query": enriched})
-
-            ret = self.retrieve(enriched, [], session_id,
-                                include_doc_ids=include_doc_ids,
-                                use_global_kb=use_global_kb,
-                                attached_doc_ids=attached_doc_ids,
-                                digest_ok=False, usage=usage)
-            chunks = ret["top_chunks"] if not ret["empty"] else []
-            answer = self._hop_answer(sub_q, chunks, usage=usage)
-            all_chunks.extend(chunks)
-            bridge.append({"hop": i, "sub_question": sub_q, "answer": answer})
-            yield ("step", {"stage": "hop_done", "hop": i, "answer": answer,
-                            "titles": [c.get("title", "") for c in chunks[:3]]})
-
-        # Union of every hop's evidence, deduplicated, capped for context
-        seen: set = set()
-        unique: list[dict] = []
-        for c in all_chunks:
-            if c["id"] not in seen:
-                seen.add(c["id"])
-                unique.append(c)
-        unique = unique[:8]
-        for idx, c in enumerate(unique, 1):
-            c["rank"] = idx
-        yield ("sources", {"sources": _chunks_to_sources(unique)})
-
-        facts = "\n".join(f"- Bước {b['hop']}: {b['sub_question']} → {b['answer']}"
-                          for b in bridge)
-        synth_question = (
-            f"{question}\n\n"
-            f"(Các dữ kiện trung gian đã xác minh qua tìm kiếm nhiều bước — "
-            f"dùng chúng để trả lời, vẫn trích dẫn [n] theo Nguồn:\n{facts})"
-        )
-        for delta in self.generate_stream(synth_question, unique, history,
-                                          usage=usage):
-            yield ("delta", delta)
 
     # ── Internals ──────────────────────────────────────────
 
@@ -1078,7 +781,7 @@ class UserRAGService:
         query in ONE LLM call. Returns the question unchanged when there is
         no history (nothing to condense), in mock mode, and on any failure.
         Generation still sees the original question + history."""
-        if not history or not self._api_key or self._api_key.startswith("sk-your"):
+        if not history or llm.is_mock():
             return question
         convo = "\n".join(
             f"{'Người dùng' if m.get('role') == 'user' else 'Trợ lý'}: {str(m['content'])[:500]}"
@@ -1086,7 +789,7 @@ class UserRAGService:
             if m.get("role") in ("user", "assistant") and m.get("content")
         )
         try:
-            client = openai.OpenAI(api_key=self._api_key)
+            client = llm.get_client()
             res = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
@@ -1159,7 +862,8 @@ class UserRAGService:
                     include_doc_ids: list[str] | None, use_global_kb: bool,
                     answer: str, sources: list[dict], complexity: str,
                     steps: list[dict] | None = None,
-                    suggestions: list[str] | None = None) -> None:
+                    suggestions: list[str] | None = None,
+                    grounding: dict | None = None) -> None:
         scope = self._cache_scope(session_id, include_doc_ids, use_global_kb)
         q_norm = " ".join(question.lower().split())
         entry = {
@@ -1167,7 +871,7 @@ class UserRAGService:
             "ts": time.time(), "emb": self._embed_question(question),
             "answer": answer, "sources": sources,
             "complexity": complexity, "steps": steps or [],
-            "suggestions": suggestions or [],
+            "suggestions": suggestions or [], "grounding": grounding,
         }
         key = hashlib.sha1(repr((scope, q_norm)).encode()).hexdigest()
         with self._lock:
@@ -1202,11 +906,11 @@ class UserRAGService:
     def _generate_chat_answer(self, question: str, chunks: list[dict],
                               history: list[dict]) -> str:
         """Generate a structured Markdown answer for the chat UI in one shot."""
-        if not self._api_key or self._api_key.startswith("sk-your"):
+        if llm.is_mock():
             preview = chunks[0]["text"][:200] if chunks else "No context"
             return f"[MOCK ANSWER] Based on context: '{preview}...'"
 
-        client = openai.OpenAI(api_key=self._api_key)
+        client = llm.get_client()
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=self._chat_messages(question, chunks, history),
@@ -1272,11 +976,15 @@ class UserRAGService:
                 text = all_chunks["documents"][i] if all_chunks["documents"] else ""
                 doc_id = meta.get("doc_id", "unknown")
                 session_id = meta.get("session_id", "")
+                # BM25 tokens follow the SAME contextual text used for the
+                # stored embeddings (rebuilt from the persisted context).
+                ctx_text = contextual_text({"text": text, "context": meta.get("context", "")})
                 self._chunks_store.append({
                     "id": cid, "text": text,
                     "title": meta.get("title", ""), "doc_id": doc_id,
                     "session_id": session_id,
-                    "tokens": _tokenize(text),
+                    "heading": meta.get("heading", ""),
+                    "tokens": _tokenize(ctx_text),
                     **({"page": meta["page"]} if "page" in meta else {}),
                 })
                 if doc_id not in chunk_by_doc:

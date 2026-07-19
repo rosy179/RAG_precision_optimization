@@ -18,6 +18,7 @@ import chromadb
 from rank_bm25 import BM25Okapi
 
 from backend.services.embeddings import get_embedding_function
+from backend.services.document_processor import contextual_text
 
 log = logging.getLogger("rag.kb")
 
@@ -86,21 +87,38 @@ class GlobalKBService:
 
     # ── Ingestion ──────────────────────────────────────────
 
+    @staticmethod
+    def _contextual_embeddings(chunks: list[dict]) -> Optional[list]:
+        """Precomputed embeddings of the context-prefixed text, or None when
+        no chunk has a context (let Chroma embed the plain `documents`)."""
+        if not any(c.get("context") for c in chunks):
+            return None
+        return list(get_embedding_function()([contextual_text(c) for c in chunks]))
+
     def add_document(self, chunks: list[dict], doc_summary: str, doc_meta: dict) -> int:
         if not chunks:
             return 0
         doc_id = doc_meta["id"]
         created_at = datetime.utcnow().isoformat()
 
+        # Contextual Retrieval: embed + tokenize the context-prefixed text,
+        # but STORE/display the original. When any chunk carries a context we
+        # precompute embeddings from the contextual text and hand them to
+        # Chroma (which then skips its own embedding of `documents`).
+        embeddings = self._contextual_embeddings(chunks)
+
         with self._write_lock:
             self._chunk_col.upsert(
                 ids=[c["id"] for c in chunks],
                 documents=[c["text"] for c in chunks],
+                embeddings=embeddings,
                 metadatas=[{
                     "doc_id": doc_id,
                     "title":  doc_meta["name"],
                     "source": doc_meta.get("type", "unknown"),
                     "chunk_index": i,
+                    "context": c.get("context", ""),
+                    "heading": c.get("heading", ""),
                     **({"page": c["page"]} if "page" in c else {}),
                 } for i, c in enumerate(chunks)],
             )
@@ -114,7 +132,8 @@ class GlobalKBService:
             # a consistent snapshot.
             self._chunks_store = self._chunks_store + [
                 {"id": c["id"], "text": c["text"], "title": doc_meta["name"],
-                 "doc_id": doc_id, "tokens": _tokenize(c["text"])}
+                 "doc_id": doc_id, "heading": c.get("heading", ""),
+                 "tokens": _tokenize(contextual_text(c))}
                 for c in chunks
             ]
             self._doc_registry = self._doc_registry + [{
@@ -201,12 +220,15 @@ class GlobalKBService:
         meta = existing["metadatas"][0] if existing["metadatas"] else {}
         if meta.get("doc_id") != doc_id:
             return False
+        # Keep the chunk's stored context so the edited text stays consistent
+        # with its siblings (embedded + tokenized as context + text).
+        ctx_text = contextual_text({"text": new_text, "context": meta.get("context", "")})
+        emb = list(get_embedding_function()([ctx_text])) if meta.get("context") else None
         with self._write_lock:
-            # upsert with the same id + metadata re-embeds the new text
             self._chunk_col.upsert(ids=[chunk_id], documents=[new_text],
-                                   metadatas=[meta])
+                                   embeddings=emb, metadatas=[meta])
             self._chunks_store = [
-                {**c, "text": new_text, "tokens": _tokenize(new_text)}
+                {**c, "text": new_text, "tokens": _tokenize(ctx_text)}
                 if c["id"] == chunk_id else c
                 for c in self._chunks_store
             ]
@@ -345,8 +367,12 @@ class GlobalKBService:
                 meta = all_chunks["metadatas"][i] if all_chunks["metadatas"] else {}
                 text = all_chunks["documents"][i] if all_chunks["documents"] else ""
                 doc_id = meta.get("doc_id", "unknown")
+                # BM25 tokens follow the SAME contextual text used for the
+                # stored embeddings (rebuilt from the persisted context).
+                ctx_text = contextual_text({"text": text, "context": meta.get("context", "")})
                 store.append({"id": cid, "text": text, "title": meta.get("title", ""),
-                              "doc_id": doc_id, "tokens": _tokenize(text)})
+                              "doc_id": doc_id, "heading": meta.get("heading", ""),
+                              "tokens": _tokenize(ctx_text)})
                 info = by_doc.setdefault(doc_id, {"name": meta.get("title", ""),
                                                   "type": meta.get("source", ""), "count": 0})
                 info["count"] += 1

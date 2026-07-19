@@ -54,6 +54,9 @@ class Message(Base):
     steps_json   = Column(Text, default="[]")
     # Suggested follow-up questions (click-to-ask chips, assistant only).
     suggestions_json = Column(Text, default="[]")
+    # Grounding-check result ({total, verified, unsupported}) — "✓ verified"
+    # badge; NULL when not checked (no citations / older messages).
+    grounding_json = Column(Text, nullable=True)
     created_at   = Column(DateTime, default=datetime.utcnow)
     session      = relationship("ChatSession", back_populates="messages")
 
@@ -108,6 +111,9 @@ def create_tables():
             conn.commit()
         if "suggestions_json" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN suggestions_json TEXT DEFAULT '[]'"))
+            conn.commit()
+        if "grounding_json" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN grounding_json TEXT"))
             conn.commit()
 
 
