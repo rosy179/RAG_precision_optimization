@@ -1,0 +1,57 @@
+name: eval-regression
+
+# Golden retrieval-regression gate (TASKLIST D3): every PR that touches the
+# retrieval pipeline must keep the answer-bearing document in the top-k for
+# the golden question set. Retrieval-only, so it needs NO OpenAI key — just
+# the local embedder + reranker (HF models are cached between runs).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/services/**"
+      - "src/**"
+      - "scripts/eval_regression.py"
+      - "data/golden_regression.json"
+      - ".github/workflows/eval-regression.yml"
+  pull_request:
+    paths:
+      - "backend/services/**"
+      - "src/**"
+      - "scripts/eval_regression.py"
+      - "data/golden_regression.json"
+      - ".github/workflows/eval-regression.yml"
+
+jobs:
+  golden-retrieval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Match the local dev stack so CI guards what actually ships.
+      EMBED_MODEL: BAAI/bge-m3
+      RERANKER_MODEL: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+      CONTEXTUAL_RETRIEVAL: "0"        # deterministic, key-free
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Cache the downloaded HF models (~2 GB) so only the first run is slow.
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-m3-mmarco-v1
+
+      - name: Install retrieval dependencies (CPU torch, no OpenAI needed)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install chromadb sentence-transformers rank-bm25 python-dotenv openai numpy
+
+      - name: Run golden retrieval regression
+        run: python scripts/eval_regression.py --top-k 3 --min-hit-rate 0.85

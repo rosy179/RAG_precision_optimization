@@ -45,8 +45,11 @@ data/*.json
 data/webapp.db
 results/*.json
 backend/uploads/
+backend_startup.log*
 
 # --- Keep git for directory structure ---
 !data/.gitkeep
 !results/.gitkeep
+# Golden set for the eval-regression CI must be tracked (not a generated artifact)
+!data/golden_regression.json
 .claude/

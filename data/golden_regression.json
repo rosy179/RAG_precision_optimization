@@ -1,0 +1,61 @@
+{
+  "_comment": "Self-contained golden set for scripts/eval_regression.py (TASKLIST D3). Small hand-written AI/ML corpus + factual questions whose answer lives in exactly one document. Retrieval-only regression: asserts the expected source survives into top-k. No OpenAI key needed — exercises embed + BM25 + RRF + rerank on local models.",
+  "documents": [
+    {
+      "title": "BERT",
+      "content": "BERT stands for Bidirectional Encoder Representations from Transformers. It was released by Google AI Language in October 2018. BERT is pre-trained on the BookCorpus and English Wikipedia using two objectives: masked language modeling and next sentence prediction. Unlike earlier models, BERT reads the entire sequence of words at once, making it bidirectional. It set new state-of-the-art results on eleven natural language processing tasks including the GLUE benchmark and SQuAD question answering."
+    },
+    {
+      "title": "The Transformer",
+      "content": "The Transformer architecture was introduced in the 2017 paper 'Attention Is All You Need' by Vaswani and colleagues at Google. It replaced recurrence entirely with a self-attention mechanism, allowing far more parallelization during training. The Transformer uses multi-head scaled dot-product attention and positional encodings to model word order. It became the foundation for later models such as BERT and GPT."
+    },
+    {
+      "title": "Retrieval Augmented Generation",
+      "content": "Retrieval Augmented Generation, or RAG, combines a retriever with a generative language model. Instead of relying only on parametric knowledge, RAG fetches relevant passages from an external corpus and conditions generation on them. This reduces hallucination and lets the model cite sources. RAG was introduced by Lewis and colleagues at Facebook AI in 2020. A typical RAG pipeline embeds documents into a vector store and retrieves the nearest neighbours to the query."
+    },
+    {
+      "title": "BM25",
+      "content": "BM25, short for Best Matching 25, is a bag-of-words ranking function used by search engines to rank documents by relevance to a query. It builds on the probabilistic retrieval framework and extends TF-IDF with term-frequency saturation and document-length normalization. BM25 has two tunable parameters, usually written k1 and b. Despite its age it remains a very strong lexical baseline and is often combined with dense retrieval in hybrid search."
+    },
+    {
+      "title": "Dense Passage Retrieval",
+      "content": "Dense Passage Retrieval, abbreviated DPR, encodes questions and passages into dense vectors using two separate BERT encoders, a question encoder and a passage encoder. Relevance is computed as the dot product between the two vectors. DPR is trained with a contrastive objective using in-batch negatives. It was shown to outperform BM25 on open-domain question answering benchmarks such as Natural Questions."
+    },
+    {
+      "title": "Cross-Encoder Reranking",
+      "content": "A cross-encoder reranker takes a query and a candidate passage together as a single input and outputs a relevance score. Because it attends jointly over both texts, a cross-encoder is far more accurate than a bi-encoder, but also much slower, so it is used to rerank a short list of candidates produced by a faster first-stage retriever. Popular cross-encoders are trained on the MS MARCO passage ranking dataset."
+    },
+    {
+      "title": "HyDE",
+      "content": "HyDE stands for Hypothetical Document Embeddings. Given a query, the method first asks a language model to write a hypothetical answer document, then embeds that document and uses its vector to search the corpus. The intuition is that a fake but plausible answer lies closer in embedding space to the real answer passages than the short query does. HyDE improves zero-shot dense retrieval, especially for queries where no labelled training data exists."
+    },
+    {
+      "title": "Reciprocal Rank Fusion",
+      "content": "Reciprocal Rank Fusion, or RRF, is a simple method for combining several ranked result lists into one. Each document receives a score equal to the sum over the lists of one divided by a constant plus its rank in that list. RRF needs no tuning and no score calibration, which makes it a robust way to fuse lexical BM25 results with dense semantic results in a hybrid search pipeline."
+    }
+  ],
+  "questions": [
+    {"question": "When was BERT released?", "expected_source": "BERT", "lang": "en"},
+    {"question": "What does BERT stand for?", "expected_source": "BERT", "lang": "en"},
+    {"question": "Which two pre-training objectives does BERT use?", "expected_source": "BERT", "lang": "en"},
+    {"question": "Which paper introduced the Transformer architecture?", "expected_source": "The Transformer", "lang": "en"},
+    {"question": "What mechanism did the Transformer use to replace recurrence?", "expected_source": "The Transformer", "lang": "en"},
+    {"question": "What does RAG combine to reduce hallucination?", "expected_source": "Retrieval Augmented Generation", "lang": "en"},
+    {"question": "Who introduced Retrieval Augmented Generation and when?", "expected_source": "Retrieval Augmented Generation", "lang": "en"},
+    {"question": "What are the two tunable parameters of BM25?", "expected_source": "BM25", "lang": "en"},
+    {"question": "What kind of ranking function is BM25?", "expected_source": "BM25", "lang": "en"},
+    {"question": "How does Dense Passage Retrieval encode questions and passages?", "expected_source": "Dense Passage Retrieval", "lang": "en"},
+    {"question": "What objective is DPR trained with?", "expected_source": "Dense Passage Retrieval", "lang": "en"},
+    {"question": "Why is a cross-encoder reranker more accurate but slower than a bi-encoder?", "expected_source": "Cross-Encoder Reranking", "lang": "en"},
+    {"question": "What does HyDE ask a language model to write first?", "expected_source": "HyDE", "lang": "en"},
+    {"question": "How does Reciprocal Rank Fusion score a document?", "expected_source": "Reciprocal Rank Fusion", "lang": "en"},
+    {"question": "Why is RRF robust for combining ranked lists?", "expected_source": "Reciprocal Rank Fusion", "lang": "en"},
+    {"question": "BERT được phát hành vào năm nào?", "expected_source": "BERT", "lang": "vi"},
+    {"question": "Kiến trúc Transformer thay thế cơ chế hồi quy bằng gì?", "expected_source": "The Transformer", "lang": "vi"},
+    {"question": "RAG kết hợp những thành phần nào để giảm bịa đặt?", "expected_source": "Retrieval Augmented Generation", "lang": "vi"},
+    {"question": "Hai tham số điều chỉnh của BM25 là gì?", "expected_source": "BM25", "lang": "vi"},
+    {"question": "BERTはいつリリースされましたか？", "expected_source": "BERT", "lang": "ja"},
+    {"question": "Transformerを紹介した論文は何ですか？", "expected_source": "The Transformer", "lang": "ja"},
+    {"question": "HyDEは最初に言語モデルに何を書かせますか？", "expected_source": "HyDE", "lang": "ja"}
+  ]
+}
