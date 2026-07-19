@@ -69,16 +69,30 @@ TIERS = {
     },
 }
 
-# Signals for heuristic classifier
+# Signals for heuristic classifier — EN + VI + JA, because the webapp
+# classifies each query in its ORIGINAL language (no English translation
+# step since the retrieval stack went multilingual).
 COMPLEX_SIGNALS   = {"why", "compare", "explain", "difference", "differences",
                       "contrast", "analyze", "analyse", "relationship", "impact",
                       "implications", "advantages", "disadvantages", "pros", "cons",
                       "elaborate", "discuss", "describe in detail",
-                      "how does", "how do", "how would", "how can", "how did"}
+                      "how does", "how do", "how would", "how can", "how did",
+                      # Vietnamese
+                      "tại sao", "vì sao", "so sánh", "khác nhau", "khác biệt",
+                      "giải thích", "phân tích", "ưu điểm", "nhược điểm",
+                      "tác động", "ảnh hưởng", "thế nào",
+                      # Japanese
+                      "なぜ", "比較", "違い", "説明", "分析", "メリット",
+                      "デメリット", "影響", "どのように", "仕組み"}
 # "how many/much/long" are factual → NOT complex; bare "how" removed intentionally
 SIMPLE_SIGNALS    = {"who", "when", "where", "which", "what year", "what date",
                      "how many", "how much", "how long", "is", "are", "was", "were",
-                     "does", "did", "name", "list"}
+                     "does", "did", "name", "list",
+                     # Vietnamese
+                     "khi nào", "ở đâu", "năm nào", "ngày nào", "bao nhiêu",
+                     "liệt kê",
+                     # Japanese
+                     "いつ", "どこ", "誰", "何年", "いくつ"}
 
 
 # ── Query Complexity Classifier ───────────────────────────
@@ -91,9 +105,12 @@ def _signal_count(signals: set, text: str) -> int:
     """
     count = 0
     for ph in signals:
-        if " " in ph:          # multi-word phrase → substring OK
+        # Multi-word phrases and CJK signals → substring match (\b never
+        # fires inside unspaced Japanese text). Single ASCII words → require
+        # word boundary.
+        if " " in ph or not ph.isascii():
             count += ph in text
-        else:                  # single word → require word boundary
+        else:
             count += bool(re.search(r'\b' + re.escape(ph) + r'\b', text))
     return count
 

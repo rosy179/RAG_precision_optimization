@@ -7,8 +7,9 @@ Usage:
   python scripts/ingest_knowledge.py --corpus data/rag_dataset.json
   python scripts/ingest_knowledge.py docs/ --urls urls.txt --force
 
-Supported files: .pdf .txt .png .jpg .jpeg .webp .mp3 .wav .m4a .ogg .webm
-(images/audio call OpenAI vision/Whisper, so they need OPENAI_API_KEY).
+Supported files: .pdf .docx .pptx .xlsx .txt .md .markdown .png .jpg .jpeg
+.webp .mp3 .wav .m4a .ogg .webm (images/audio and scanned-PDF OCR call
+OpenAI vision/Whisper, so they need OPENAI_API_KEY).
 The --urls file contains one URL per line; blank lines and lines starting
 with '#' are skipped.
 The --corpus file is this project's JSON corpus format: either a list of

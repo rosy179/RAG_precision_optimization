@@ -74,6 +74,21 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _save_suggestions(db2: Session, message_id: str | None,
+                      questions: list[str]) -> None:
+    """Attach the post-done suggestion chips to the persisted message so
+    they survive a reload (rendered on the conversation's last answer)."""
+    if not message_id:
+        return
+    try:
+        msg = db2.query(Message).filter(Message.id == message_id).first()
+        if msg:
+            msg.suggestions_json = json.dumps(questions, ensure_ascii=False)
+            db2.commit()
+    except Exception:
+        db2.rollback()
+
+
 def _attached_doc_ids(db: Session, user_id: str, session_id: str,
                       names: list[str]) -> list[str] | None:
     """Resolve attachment names sent with the message to session doc ids so
@@ -147,6 +162,7 @@ def get_messages(
             "attachments": json.loads(m.attachments_json or "[]"),
             "feedback":    m.feedback,
             "steps":       json.loads(m.steps_json or "[]"),
+            "suggestions": json.loads(m.suggestions_json or "[]"),
             "created_at":  m.created_at.isoformat(),
         }
         for m in session.messages
@@ -233,6 +249,9 @@ def chat_stream(
         complexity = "medium"
         n_hops = 0
         retrieval_empty = False
+        # True once the exchange is saved — a disconnect during the
+        # post-done extras must not persist it a second time.
+        persisted = False
         # Real token usage accumulated across every LLM call of this request
         usage: dict = {"in": 0, "out": 0, "real": False}
 
@@ -265,12 +284,17 @@ def chat_stream(
                         parts.append(answer[i:i + 64])
                         yield _sse("delta", {"text": answer[i:i + 64]})
                     ids = persist(db2, answer, sources, steps)
+                    persisted = True
                     log("success")
                     yield _sse("done", {
                         "latency_ms": int((time.time() - t0) * 1000),
                         "from_cache": True,
                         **ids,
                     })
+                    if hit.get("suggestions"):
+                        yield _sse("suggestions", {"questions": hit["suggestions"]})
+                        _save_suggestions(db2, ids.get("message_id"),
+                                          hit["suggestions"])
                     return
 
             if wants_prev_transform(req.question, req.history):
@@ -299,6 +323,7 @@ def chat_stream(
                         log("error")
                         return
                 ids = persist(db2, "".join(parts).strip(), sources, steps)
+                persisted = True
                 log("success")
                 yield _sse("done", {
                     "latency_ms": int((time.time() - t0) * 1000),
@@ -385,25 +410,37 @@ def chat_stream(
                             return  # nothing to save — same as old behavior
 
             ids = persist(db2, "".join(parts).strip(), sources, steps)
+            persisted = True
             log("success")
             yield _sse("done", {
                 "latency_ms": int((time.time() - t0) * 1000),
                 **ids,
             })
-            # Cache AFTER the done event (embedding call would delay it);
-            # runs when StreamingResponse exhausts the generator normally.
+            # Post-done extras — suggestion chips, then the answer cache —
+            # run AFTER done so they never delay the answer (the extra LLM /
+            # embedding calls would add ~1s each). A client disconnect here
+            # only skips the extras; the exchange is already saved above.
+            suggestions: list[str] = []
+            if parts and sources and not retrieval_empty:
+                suggestions = rag.suggest_questions(req.question,
+                                                    "".join(parts), sources)
+                if suggestions:
+                    yield _sse("suggestions", {"questions": suggestions})
+                    _save_suggestions(db2, ids.get("message_id"), suggestions)
             if cacheable and parts and sources and not retrieval_empty:
                 try:
                     rag.cache_store(req.question, session_id,
                                     req.include_doc_ids, req.use_global_kb,
                                     "".join(parts).strip(), sources,
-                                    complexity, steps)
+                                    complexity, steps, suggestions)
                 except Exception:
                     pass
         except GeneratorExit:
             # Client aborted (Stop button / closed tab): keep the partial
-            # answer so the conversation stays coherent on reload.
-            if parts:
+            # answer so the conversation stays coherent on reload. Once
+            # `persisted` is set the exchange is already saved — the client
+            # merely left during the post-done extras.
+            if parts and not persisted:
                 persist(db2, "".join(parts).strip(), sources, steps)
                 log("aborted")
             raise

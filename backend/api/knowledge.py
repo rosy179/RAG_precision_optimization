@@ -12,6 +12,7 @@ from typing import Optional
 import openai
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from backend.database import User
 from backend.api.auth import get_current_user
@@ -161,4 +162,52 @@ def delete_knowledge(
         raise HTTPException(404, "Document not found")
     kb.remove_document(doc_id)
     _pdf_path(doc_id).unlink(missing_ok=True)
+    return {"success": True}
+
+
+# ── Chunk-level editing (admin precision tooling) ─────────
+
+class ChunkUpdate(BaseModel):
+    text: str
+
+
+@router.get("/{doc_id}/chunks")
+def list_chunks(doc_id: str, current_user: User = Depends(require_kb_admin)):
+    """Every parsed chunk of a KB document, for reviewing/pruning junk."""
+    kb = get_kb()
+    doc = next((d for d in kb.get_documents() if d["id"] == doc_id), None)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    chunks = kb.list_chunks(doc_id)
+    if chunks is None:
+        raise HTTPException(404, "Document has no indexed chunks")
+    return {"doc_id": doc_id, "name": doc["name"], "chunks": chunks}
+
+
+@router.patch("/{doc_id}/chunks/{chunk_id}")
+def update_chunk(
+    doc_id: str, chunk_id: str, body: ChunkUpdate,
+    current_user: User = Depends(require_kb_admin),
+):
+    """Edit a chunk's text (re-embeds it)."""
+    kb = get_kb()
+    try:
+        ok = kb.update_chunk(doc_id, chunk_id, body.text)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except openai.APIError as e:
+        raise HTTPException(502, openai_error_detail(e)) from e
+    if not ok:
+        raise HTTPException(404, "Chunk not found in this document")
+    return {"success": True}
+
+
+@router.delete("/{doc_id}/chunks/{chunk_id}")
+def delete_chunk(
+    doc_id: str, chunk_id: str,
+    current_user: User = Depends(require_kb_admin),
+):
+    """Remove a single junk chunk (keeps the document)."""
+    if not get_kb().delete_chunk(doc_id, chunk_id):
+        raise HTTPException(404, "Chunk not found in this document")
     return {"success": True}

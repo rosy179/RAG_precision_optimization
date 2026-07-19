@@ -81,7 +81,13 @@ def run_ragas_evaluation(eval_data: dict, run_name="baseline") -> dict:
         from ragas.embeddings import LangchainEmbeddingsWrapper
 
         llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-        embed_model = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
+        # Judge embeddings (answer_relevancy) are PINNED, independent of the
+        # pipeline's EMBED_MODEL: that may be a local model the OpenAI API
+        # rejects, and swapping the judge embedder changes the cosine scale
+        # (ada-002 ≈0.95 vs 3-small ≈0.84 on the same paraphrase pair),
+        # which would make scores incomparable with every earlier run in
+        # results/. Override only deliberately, via RAGAS_EMBED_MODEL.
+        embed_model = os.getenv("RAGAS_EMBED_MODEL", "text-embedding-ada-002")
 
         # Explicitly initialize and wrap LangChain models for Ragas
         langchain_llm = ChatOpenAI(model=llm_model, api_key=api_key)
