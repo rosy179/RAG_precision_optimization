@@ -2,12 +2,14 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Send, Mic, Paperclip, X, Globe,
   Loader2, Square, CheckCircle2, AlertCircle,
-  BookOpen, Download, FileText, SlidersHorizontal,
+  Download, SlidersHorizontal,
 } from "lucide-react";
-import { sessionsAPI, documentsAPI, knowledgeAPI, chatStream } from "../api/client";
+import { sessionsAPI, documentsAPI, knowledgeAPI } from "../api/client";
 import MessageBubble from "../components/MessageBubble";
 import AiRobotIcon from "../components/AiRobotIcon";
 import DocViewerPanel from "../components/DocViewerPanel";
+import SourcePicker from "../components/SourcePicker";
+import { useChatStream } from "../hooks/useChatStream";
 import type { ViewerTarget } from "../components/DocViewerPanel";
 import type { AttachmentDoc, Message, Source } from "../components/MessageBubble";
 
@@ -38,9 +40,10 @@ const URL_REGEX = /^https?:\/\/\S+$/i;
 const MAX_INPUT_HEIGHT = 120;
 
 export default function ChatPage({ sessionId, onSessionCreated }: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Message list + SSE streaming plumbing live in a dedicated hook (E3).
+  const { messages, setMessages, sending, setSending, patchMessage, runStream, stopStreaming } =
+    useChatStream(onSessionCreated);
   const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [urlTip, setUrlTip] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -69,7 +72,6 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
   // Uploads still in flight — send() waits for them so a question typed right
   // after pasting a link/file actually sees that newest document.
   const inflightUploadsRef = useRef<Set<Promise<unknown>>>(new Set());
-  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (sessionIdRef.current !== sessionId) {
@@ -341,67 +343,6 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     recorderRef.current = null;
     setRecording(false);
     textareaRef.current?.focus();
-  }, []);
-
-  const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-  }, []);
-
-  /** Drive one SSE exchange into the placeholder assistant message `aiId`. */
-  const runStream = useCallback(async (
-    sid: string,
-    aiId: string,
-    body: { question: string; history: object[]; attachments?: string[]; regenerate_message_id?: string },
-  ) => {
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    let content = "";
-    // Tracks the message's live id: it may swap from the local placeholder
-    // to the DB uuid on done, before the post-done suggestions arrive.
-    let liveId = aiId;
-    try {
-      await chatStream(sid, body, {
-        onMeta: (meta) => patchMessage(aiId, { sources: meta.sources as Source[] }),
-        onStep: (step) => {
-          setMessages((prev) => prev.map((m) =>
-            m.id === aiId ? { ...m, steps: [...(m.steps ?? []), step] } : m
-          ));
-        },
-        onDelta: (text) => {
-          content += text;
-          patchMessage(aiId, { content });
-        },
-        onDone: (done) => {
-          // Swap in the DB id last so feedback targets the persisted row.
-          if (done.message_id) liveId = done.message_id;
-          patchMessage(aiId, { streaming: false, ...(done.message_id ? { id: done.message_id } : {}) });
-          // First exchange sets an LLM-generated title — refresh the sidebar
-          if (done.session_title) onSessionCreated(sid);
-        },
-        // Chips arrive after done; the message id may already be the DB uuid.
-        onSuggestions: (questions) => patchMessage(liveId, { suggestions: questions }),
-        onError: (detail) => {
-          content = content || detail;
-          patchMessage(aiId, { content, streaming: false });
-        },
-      }, ctrl.signal);
-    } catch (err: any) {
-      if (err?.name !== "AbortError") {
-        patchMessage(aiId, {
-          content: content || "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.",
-          streaming: false,
-        });
-      }
-      // Aborted: keep the partial answer (backend persists it too)
-    } finally {
-      abortRef.current = null;
-      setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
-      setSending(false);
-    }
-  }, [patchMessage, onSessionCreated]);
-
-  const stopStreaming = useCallback(() => {
-    abortRef.current?.abort();
   }, []);
 
   /** Chat-body fields reflecting the source picker state. */
@@ -819,58 +760,15 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
 
               {/* Source picker popover */}
               {pickerOpen && (
-                <div
-                  className="mb-3 rounded-2xl px-3 py-3"
-                  style={{
-                    background: "rgba(255,255,255,0.9)",
-                    border: "1px solid rgba(124,58,237,0.18)",
-                  }}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-xs font-semibold text-[#1A1A2E]">Nguồn tham khảo cho câu hỏi</p>
-                    <button onClick={() => setPickerOpen(false)} className="text-gray-400 hover:text-gray-600">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  <label className="flex items-center gap-2 text-xs text-[#1A1A2E] py-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={useGlobalKb}
-                      onChange={(e) => setUseGlobalKb(e.target.checked)}
-                      className="accent-[#7C3AED]"
-                    />
-                    <BookOpen className="w-3.5 h-3.5" style={{ color: "#3B82F6" }} />
-                    <span>Kho kiến thức chung <span className="text-gray-400">({kbDocCount} tài liệu)</span></span>
-                  </label>
-                  {sessionDocs.length > 0 ? (
-                    <div className="max-h-40 overflow-y-auto mt-1 space-y-0.5">
-                      {sessionDocs.map((d) => (
-                        <label key={d.id} className="flex items-center gap-2 text-xs text-[#1A1A2E] py-1 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={!excludedDocs.has(d.id)}
-                            onChange={(e) => {
-                              setExcludedDocs((prev) => {
-                                const next = new Set(prev);
-                                if (e.target.checked) next.delete(d.id);
-                                else next.add(d.id);
-                                return next;
-                              });
-                            }}
-                            className="accent-[#7C3AED]"
-                          />
-                          <FileText className="w-3.5 h-3.5 shrink-0" style={{ color: "#7C3AED" }} />
-                          <span className="truncate flex-1">{d.name}</span>
-                          <span className="text-gray-400 shrink-0">{d.chunk_count} chunks</span>
-                        </label>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-[11px] text-gray-400 mt-1">
-                      Chưa có tài liệu nào trong cuộc trò chuyện này.
-                    </p>
-                  )}
-                </div>
+                <SourcePicker
+                  sessionDocs={sessionDocs}
+                  kbDocCount={kbDocCount}
+                  excludedDocs={excludedDocs}
+                  setExcludedDocs={setExcludedDocs}
+                  useGlobalKb={useGlobalKb}
+                  setUseGlobalKb={setUseGlobalKb}
+                  onClose={() => setPickerOpen(false)}
+                />
               )}
 
               {/* Main row: textarea + action buttons */}

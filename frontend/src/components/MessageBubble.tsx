@@ -3,12 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   BookOpen, Check, ChevronDown, ChevronUp, Copy, FileSpreadsheet, FileText,
-  GitBranch, Globe, Image, Loader2, Presentation, RefreshCw, Sparkles,
-  ThumbsDown, ThumbsUp,
+  GitBranch, Globe, Image, Loader2, Presentation, RefreshCw, ShieldCheck,
+  ShieldAlert, Sparkles, ThumbsDown, ThumbsUp,
 } from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
 import { documentsAPI } from "../api/client";
-import type { MultihopStep } from "../api/client";
+import type { GroundingResult, MultihopStep } from "../api/client";
 
 export interface Source {
   rank: number;
@@ -32,6 +32,8 @@ export interface Message {
   steps?: MultihopStep[];
   /** Suggested follow-up questions (click-to-ask chips) */
   suggestions?: string[];
+  /** Grounding-check result (cited-claim verification badge) */
+  grounding?: GroundingResult | null;
   /** true while SSE deltas are still arriving for this message */
   streaming?: boolean;
   created_at?: string;
@@ -302,6 +304,46 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
   );
 }
 
+/** Grounding badge: shows whether the answer's cited claims [n] were verified
+ *  against their sources (the online counterpart of offline Faithfulness). */
+function GroundingBadge({ grounding }: { grounding: GroundingResult }) {
+  const { total, verified, unsupported } = grounding;
+  if (!total) return null;
+  const allOk = unsupported.length === 0;
+  return (
+    <span className="relative inline-flex group">
+      <span
+        className="flex items-center gap-1 h-7 px-2 rounded-lg text-[11px] font-medium cursor-default"
+        style={allOk
+          ? { background: "rgba(16,185,129,0.1)", color: "#059669" }
+          : { background: "rgba(245,158,11,0.12)", color: "#B45309" }}
+      >
+        {allOk ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
+        {allOk ? "Đã kiểm chứng" : `${verified}/${total} có căn cứ`}
+      </span>
+      <span
+        className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-64 rounded-xl px-3 py-2 text-left z-30 shadow-lg text-[11px]"
+        style={{ background: "rgba(255,255,255,0.97)", border: "1px solid rgba(124,58,237,0.2)", color: "#1A1A2E" }}
+      >
+        {allOk ? (
+          <span>Toàn bộ {total} câu có trích dẫn đều được nguồn hỗ trợ trực tiếp.</span>
+        ) : (
+          <>
+            <span className="font-semibold block mb-1">
+              {unsupported.length} câu chưa được nguồn hỗ trợ rõ:
+            </span>
+            <ul className="list-disc pl-4 space-y-0.5">
+              {unsupported.slice(0, 3).map((u, i) => (
+                <li key={i} className="text-gray-500 line-clamp-2">{u}</li>
+              ))}
+            </ul>
+          </>
+        )}
+      </span>
+    </span>
+  );
+}
+
 export default function MessageBubble({
   msg, onFeedback, onRegenerate, onOpenSource, resolveAttachment, onOpenAttachment,
   onAskSuggestion,
@@ -506,6 +548,9 @@ export default function MessageBubble({
                 <RefreshCw className="w-3.5 h-3.5" />
                 Tạo lại
               </button>
+            )}
+            {msg.grounding && (
+              <span className="ml-auto"><GroundingBadge grounding={msg.grounding} /></span>
             )}
           </div>
         )}

@@ -62,6 +62,8 @@ export interface StreamDone {
   user_message_id?: string;
   session_title?: string;
 }
+export interface GroundingResult { total: number; verified: number; unsupported: string[] }
+
 export interface StreamCallbacks {
   onMeta?: (meta: StreamMeta) => void;
   onStep?: (step: MultihopStep) => void;
@@ -69,6 +71,8 @@ export interface StreamCallbacks {
   onDone?: (done: StreamDone) => void;
   /** Follow-up question chips — arrives AFTER done (server generates them post-answer) */
   onSuggestions?: (questions: string[]) => void;
+  /** Grounding-check result — arrives AFTER done (cited-claim verification) */
+  onGrounding?: (grounding: GroundingResult) => void;
   onError?: (detail: string) => void;
 }
 
@@ -136,6 +140,7 @@ export async function chatStream(
         else if (event === "delta") cb.onDelta?.(parsed.text);
         else if (event === "done") cb.onDone?.(parsed);
         else if (event === "suggestions") cb.onSuggestions?.(parsed.questions ?? []);
+        else if (event === "grounding") cb.onGrounding?.(parsed);
         else if (event === "error") cb.onError?.(parsed.detail);
       } catch { /* skip malformed frame */ }
     }
