@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertCircle, BookOpen, CheckCircle2, Eye, FileText, Globe, Image, Link2,
-  Loader2, Mic, RefreshCw, Search, Trash2, Upload, X,
+  AlertCircle, BookOpen, CheckCircle2, Eye, FileSpreadsheet, FileText, Globe,
+  Image, Layers, Link2, Loader2, Mic, Presentation, RefreshCw, Search, Trash2, Upload, X,
 } from "lucide-react";
 import { knowledgeAPI } from "../api/client";
 import type { KbDoc } from "../api/client";
 import DocViewerPanel from "../components/DocViewerPanel";
+import ChunkManagerPanel from "../components/ChunkManagerPanel";
 import type { ViewerTarget } from "../components/DocViewerPanel";
 
-const FILE_ACCEPT = ".pdf,.txt,.png,.jpg,.jpeg,.webp,.mp3,.wav,.m4a,.ogg,.webm";
+const FILE_ACCEPT = ".pdf,.txt,.md,.markdown,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.mp3,.wav,.m4a,.ogg,.webm";
 
 interface UploadStatus {
   id: string;
@@ -21,11 +22,14 @@ const typeIcon = (type: string) => {
   if (type === "url") return <Globe className="w-4 h-4" />;
   if (type === "image") return <Image className="w-4 h-4" />;
   if (type === "audio") return <Mic className="w-4 h-4" />;
+  if (type === "xlsx") return <FileSpreadsheet className="w-4 h-4" />;
+  if (type === "pptx") return <Presentation className="w-4 h-4" />;
   return <FileText className="w-4 h-4" />;
 };
 
 const typeLabel: Record<string, string> = {
-  pdf: "PDF", txt: "Văn bản", url: "Web", image: "Ảnh", audio: "Âm thanh",
+  pdf: "PDF", txt: "Văn bản", markdown: "Markdown", url: "Web", image: "Ảnh",
+  audio: "Âm thanh", docx: "Word", pptx: "PowerPoint", xlsx: "Excel",
   corpus: "Corpus", json: "JSON",
 };
 
@@ -41,6 +45,7 @@ export default function KnowledgePage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [viewerTarget, setViewerTarget] = useState<ViewerTarget | null>(null);
+  const [chunkTarget, setChunkTarget] = useState<{ id: string; name: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
@@ -328,6 +333,15 @@ export default function KnowledgePage() {
                 >
                   <Eye className="w-4 h-4" />
                 </button>
+                {canManage && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setChunkTarget({ id: d.id, name: d.name }); }}
+                    title="Xem & sửa chunk"
+                    className="hidden md:flex opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-all shrink-0"
+                  >
+                    <Layers className="w-4 h-4" />
+                  </button>
+                )}
                 {canManage && (confirmDelete === d.id ? (
                   <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
                     <button
@@ -383,6 +397,32 @@ export default function KnowledgePage() {
             style={{ animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)" }}
           >
             <DocViewerPanel target={viewerTarget} onClose={() => setViewerTarget(null)} />
+          </div>
+        </>
+      )}
+
+      {/* Chunk editor — same drawer pattern (admin) */}
+      {chunkTarget && (
+        <>
+          <div
+            aria-label="Đóng trình sửa chunk"
+            onClick={() => setChunkTarget(null)}
+            style={{
+              position: "fixed", inset: 0, background: "rgba(15,10,30,0.22)",
+              backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
+              zIndex: 40, animation: "fadeIn 0.2s ease",
+            }}
+          />
+          <div
+            className="fixed inset-y-0 right-0 z-[41] flex flex-col overflow-hidden w-full sm:w-[min(70vw,520px)] lg:w-[min(44vw,560px)]"
+            style={{ animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)" }}
+          >
+            <ChunkManagerPanel
+              docId={chunkTarget.id}
+              docName={chunkTarget.name}
+              onClose={() => setChunkTarget(null)}
+              onChanged={load}
+            />
           </div>
         </>
       )}

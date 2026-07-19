@@ -67,6 +67,8 @@ export interface StreamCallbacks {
   onStep?: (step: MultihopStep) => void;
   onDelta?: (text: string) => void;
   onDone?: (done: StreamDone) => void;
+  /** Follow-up question chips — arrives AFTER done (server generates them post-answer) */
+  onSuggestions?: (questions: string[]) => void;
   onError?: (detail: string) => void;
 }
 
@@ -133,6 +135,7 @@ export async function chatStream(
         else if (event === "step") cb.onStep?.(parsed);
         else if (event === "delta") cb.onDelta?.(parsed.text);
         else if (event === "done") cb.onDone?.(parsed);
+        else if (event === "suggestions") cb.onSuggestions?.(parsed.questions ?? []);
         else if (event === "error") cb.onError?.(parsed.detail);
       } catch { /* skip malformed frame */ }
     }
@@ -195,12 +198,25 @@ export interface KbDoc {
   created_at: string;
 }
 
+export interface KbChunk {
+  id: string;
+  text: string;
+  chunk_index: number;
+  page?: number;
+}
+
 export const knowledgeAPI = {
   list: (): Promise<{ documents: KbDoc[]; total_chunks: number; can_manage: boolean }> =>
     api.get("/api/knowledge").then((r) => r.data),
   content: (docId: string): Promise<DocContent> =>
     api.get(`/api/knowledge/${docId}/content`).then((r) => r.data),
   fileUrl: (docId: string) => `${API_BASE}/api/knowledge/${docId}/file`,
+  chunks: (docId: string): Promise<{ doc_id: string; name: string; chunks: KbChunk[] }> =>
+    api.get(`/api/knowledge/${docId}/chunks`).then((r) => r.data),
+  updateChunk: (docId: string, chunkId: string, text: string) =>
+    api.patch(`/api/knowledge/${docId}/chunks/${chunkId}`, { text }).then((r) => r.data),
+  deleteChunk: (docId: string, chunkId: string) =>
+    api.delete(`/api/knowledge/${docId}/chunks/${chunkId}`).then((r) => r.data),
   uploadFile: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -231,7 +247,22 @@ export interface MonitoringStats {
   per_day: { date: string; queries: number; cost_usd: number; multihop: number }[];
 }
 
+export interface DownvotedItem {
+  message_id: string;
+  session_id: string;
+  question: string;
+  answer: string;
+  sources: { rank: number; title: string; snippet: string }[];
+  created_at: string;
+  in_eval_queue: boolean;
+}
+
 export const monitoringAPI = {
   stats: (days = 14): Promise<MonitoringStats> =>
     api.get("/api/monitoring/stats", { params: { days } }).then((r) => r.data),
+  downvoted: (days = 30): Promise<{ items: DownvotedItem[] }> =>
+    api.get("/api/monitoring/downvoted", { params: { days } }).then((r) => r.data),
+  addToEvalQueue: (messageId: string, groundTruth?: string): Promise<{ success: boolean; already_queued: boolean; total: number }> =>
+    api.post("/api/monitoring/eval-queue", { message_id: messageId, ground_truth: groundTruth })
+      .then((r) => r.data),
 };

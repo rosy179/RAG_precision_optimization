@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Send, Mic, Paperclip, X, Globe,
   Loader2, Square, CheckCircle2, AlertCircle,
-  BookOpen, FileText, SlidersHorizontal,
+  BookOpen, Download, FileText, SlidersHorizontal,
 } from "lucide-react";
 import { sessionsAPI, documentsAPI, knowledgeAPI, chatStream } from "../api/client";
 import MessageBubble from "../components/MessageBubble";
@@ -29,7 +29,7 @@ interface SessionDoc {
   chunk_count: number;
 }
 
-const DOC_ACCEPT = ".pdf,.txt";
+const DOC_ACCEPT = ".pdf,.txt,.md,.markdown,.docx,.pptx,.xlsx";
 const IMAGE_ACCEPT = ".png,.jpg,.jpeg,.webp";
 const AUDIO_ACCEPT = ".mp3,.wav,.m4a,.ogg,.webm";
 const FILE_ACCEPT = `${DOC_ACCEPT},${IMAGE_ACCEPT},${AUDIO_ACCEPT}`;
@@ -356,6 +356,9 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     let content = "";
+    // Tracks the message's live id: it may swap from the local placeholder
+    // to the DB uuid on done, before the post-done suggestions arrive.
+    let liveId = aiId;
     try {
       await chatStream(sid, body, {
         onMeta: (meta) => patchMessage(aiId, { sources: meta.sources as Source[] }),
@@ -370,10 +373,13 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
         },
         onDone: (done) => {
           // Swap in the DB id last so feedback targets the persisted row.
+          if (done.message_id) liveId = done.message_id;
           patchMessage(aiId, { streaming: false, ...(done.message_id ? { id: done.message_id } : {}) });
           // First exchange sets an LLM-generated title — refresh the sidebar
           if (done.session_title) onSessionCreated(sid);
         },
+        // Chips arrive after done; the message id may already be the DB uuid.
+        onSuggestions: (questions) => patchMessage(liveId, { suggestions: questions }),
         onError: (detail) => {
           content = content || detail;
           patchMessage(aiId, { content, streaming: false });
@@ -467,6 +473,19 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     if (isNewSession) onSessionCreated(sid);
   }, [input, sending, messages, ensureSession, onSessionCreated, runStream, sourceParams, stopRecording]);
 
+  /** Ask a suggested follow-up chip: a plain question in the existing session,
+   *  no attachments, current answer as history. */
+  const askSuggestion = useCallback(async (q: string) => {
+    if (sending || !q.trim() || !sessionIdRef.current) return;
+    setSending(true);
+    const sid = sessionIdRef.current;
+    const userMsg: Message = { id: Date.now().toString(), role: "user", content: q };
+    const aiId = (Date.now() + 1).toString();
+    setMessages((prev) => [...prev, userMsg, { id: aiId, role: "assistant", content: "", streaming: true }]);
+    const history = messages.slice(-6).map((m) => ({ role: m.role, content: m.content }));
+    await runStream(sid, aiId, { question: q, history, ...sourceParams() });
+  }, [sending, messages, runStream, sourceParams]);
+
   const regenerate = useCallback(async () => {
     if (sending || !sessionIdRef.current) return;
     // Last assistant message + the user question that produced it
@@ -505,6 +524,45 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  /** Export the conversation to a Markdown file, citations preserved and each
+   *  answer's sources appended as a numbered list. Fully client-side. */
+  const exportConversation = useCallback(() => {
+    if (messages.length === 0) return;
+    const firstQ = messages.find((m) => m.role === "user")?.content ?? "Hội thoại";
+    const title = firstQ.length > 60 ? firstQ.slice(0, 60) + "…" : firstQ;
+    const lines: string[] = [
+      `# ${title}`,
+      "",
+      `_Xuất từ RAG Chatbot · ${new Date().toLocaleString("vi-VN")}_`,
+      "",
+    ];
+    for (const m of messages) {
+      if (!m.content) continue;
+      if (m.role === "user") {
+        lines.push(`## 👤 ${m.content}`, "");
+      } else {
+        lines.push("**🤖 Trả lời:**", "", m.content, "");
+        if (m.sources && m.sources.length > 0) {
+          lines.push("**Nguồn tham khảo:**");
+          m.sources.forEach((s) => {
+            const scope = s.scope === "global" ? " _(kho chung)_" : "";
+            lines.push(`${s.rank}. ${s.title}${s.page ? ` — tr.${s.page}` : ""}${scope}`);
+          });
+          lines.push("");
+        }
+        lines.push("---", "");
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `hoi-thoai-${stamp}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [messages]);
+
   const isEmpty = messages.length === 0;
 
 
@@ -532,8 +590,25 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
       />
 
       {/* Main chat */}
-      <div className="flex flex-col flex-1 min-w-0">
+      <div className="flex flex-col flex-1 min-w-0 relative">
 
+        {/* Export conversation — floating, appears once there are messages */}
+        {!isEmpty && (
+          <button
+            onClick={exportConversation}
+            title="Xuất hội thoại ra Markdown"
+            className="absolute top-3 right-3 z-20 h-9 px-3 rounded-2xl flex items-center gap-1.5 text-xs font-medium shadow-sm transition-all hover:shadow-md hover:-translate-y-px"
+            style={{
+              background: "rgba(255,255,255,0.8)",
+              border: "1px solid rgba(124,58,237,0.2)",
+              backdropFilter: "blur(10px)",
+              color: "#7C3AED",
+            }}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Xuất</span>
+          </button>
+        )}
 
         {/* Messages */}
         <div
@@ -574,6 +649,11 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                   onRegenerate={
                     !sending && m.role === "assistant" && i === messages.length - 1
                       ? regenerate
+                      : undefined
+                  }
+                  onAskSuggestion={
+                    !sending && m.role === "assistant" && i === messages.length - 1
+                      ? askSuggestion
                       : undefined
                   }
                 />

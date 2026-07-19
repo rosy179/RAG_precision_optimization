@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  BookOpen, Check, ChevronDown, ChevronUp, Copy, FileText, GitBranch, Globe,
-  Image, Loader2, RefreshCw, ThumbsDown, ThumbsUp,
+  BookOpen, Check, ChevronDown, ChevronUp, Copy, FileSpreadsheet, FileText,
+  GitBranch, Globe, Image, Loader2, Presentation, RefreshCw, Sparkles,
+  ThumbsDown, ThumbsUp,
 } from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
 import { documentsAPI } from "../api/client";
@@ -29,6 +30,8 @@ export interface Message {
   feedback?: "up" | "down" | null;
   /** Multi-hop reasoning steps (chained retrieval) */
   steps?: MultihopStep[];
+  /** Suggested follow-up questions (click-to-ask chips) */
+  suggestions?: string[];
   /** true while SSE deltas are still arriving for this message */
   streaming?: boolean;
   created_at?: string;
@@ -51,11 +54,15 @@ interface Props {
   resolveAttachment?: (name: string) => AttachmentDoc | undefined;
   /** Open the document viewer for an attached document */
   onOpenAttachment?: (doc: AttachmentDoc) => void;
+  /** Ask a suggested follow-up question (only wired on the last answer) */
+  onAskSuggestion?: (question: string) => void;
 }
 
 const typeIcon = (title: string) => {
   if (title.startsWith("http")) return <Globe className="w-3.5 h-3.5" />;
   if (/\.(png|jpg|jpeg|webp)/i.test(title)) return <Image className="w-3.5 h-3.5" />;
+  if (/\.xlsx?$/i.test(title)) return <FileSpreadsheet className="w-3.5 h-3.5" />;
+  if (/\.pptx?$/i.test(title)) return <Presentation className="w-3.5 h-3.5" />;
   return <FileText className="w-3.5 h-3.5" />;
 };
 
@@ -297,6 +304,7 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
 
 export default function MessageBubble({
   msg, onFeedback, onRegenerate, onOpenSource, resolveAttachment, onOpenAttachment,
+  onAskSuggestion,
 }: Props) {
   const [showSources, setShowSources] = useState(false);
   const [highlightRank, setHighlightRank] = useState<number | null>(null);
@@ -570,6 +578,28 @@ export default function MessageBubble({
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Suggested follow-up questions — click-to-ask chips (last answer only) */}
+        {!msg.streaming && onAskSuggestion && msg.suggestions && msg.suggestions.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap gap-1.5" style={{ animation: "fadeIn 0.25s ease" }}>
+            {msg.suggestions.map((q, i) => (
+              <button
+                key={i}
+                onClick={() => onAskSuggestion(q)}
+                title="Hỏi câu này"
+                className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 text-left transition-all hover:shadow-md hover:-translate-y-px"
+                style={{
+                  background: "rgba(124,58,237,0.06)",
+                  border: "1px solid rgba(124,58,237,0.22)",
+                  color: "#5B21B6",
+                }}
+              >
+                <Sparkles className="w-3 h-3 shrink-0" style={{ color: "#7C3AED" }} />
+                <span className="line-clamp-1">{q}</span>
+              </button>
+            ))}
           </div>
         )}
       </div>

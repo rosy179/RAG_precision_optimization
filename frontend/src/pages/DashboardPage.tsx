@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity, Coins, GitBranch, Loader2, MessageSquare, ShieldAlert,
-  ThumbsDown, ThumbsUp, Timer,
+  Activity, Check, ChevronDown, ChevronUp, ClipboardCheck, Coins, GitBranch,
+  Loader2, MessageSquare, ShieldAlert, ThumbsDown, ThumbsUp, Timer,
 } from "lucide-react";
 import { monitoringAPI } from "../api/client";
-import type { MonitoringStats } from "../api/client";
+import type { DownvotedItem, MonitoringStats } from "../api/client";
 
 // Single data hue (validated vs light surface — see dataviz palette check)
 const DATA_HUE = "#7C3AED";
@@ -148,6 +148,120 @@ function ComplexityBreakdown({ data }: { data: Record<string, number> }) {
           <span className="w-10 shrink-0 font-semibold" style={{ color: INK }}>{count}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Downvoted answers → the online-feedback-to-offline-eval loop. Each row can
+ *  be pushed into the eval queue (data/feedback_eval_queue.json) for later
+ *  ground-truth labelling and regression tracking (TASKLIST D4). */
+function DownvotedPanel({ days }: { days: number }) {
+  const [items, setItems] = useState<DownvotedItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [queuing, setQueuing] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setItems(null);
+    setError(null);
+    monitoringAPI.downvoted(Math.max(days, 30))
+      .then((d) => { if (!cancelled) setItems(d.items); })
+      .catch(() => { if (!cancelled) setError("Không tải được danh sách."); });
+    return () => { cancelled = true; };
+  }, [days]);
+
+  const addToQueue = async (id: string) => {
+    setQueuing(id);
+    try {
+      await monitoringAPI.addToEvalQueue(id);
+      setItems((prev) => prev?.map((i) =>
+        i.message_id === id ? { ...i, in_eval_queue: true } : i) ?? null);
+    } catch { /* keep button state; user can retry */ }
+    finally { setQueuing(null); }
+  };
+
+  return (
+    <div
+      className="rounded-2xl px-5 py-4 mb-10"
+      style={{ background: "rgba(255,255,255,0.65)", border: "1px solid rgba(124,58,237,0.12)" }}
+    >
+      <p className="text-sm font-semibold mb-1 flex items-center gap-2" style={{ color: INK }}>
+        <ThumbsDown className="w-4 h-4" style={{ color: "#EF4444" }} />
+        Câu trả lời bị đánh giá thấp
+      </p>
+      <p className="text-[11px] mb-3" style={{ color: MUTED }}>
+        Đưa vào bộ eval để gán đáp án đúng và theo dõi hồi quy — khép vòng lặp cải thiện.
+      </p>
+
+      {!items && !error && (
+        <div className="flex items-center gap-2 py-4 text-xs" style={{ color: MUTED }}>
+          <Loader2 className="w-4 h-4 animate-spin" /> Đang tải…
+        </div>
+      )}
+      {error && <p className="text-xs py-3" style={{ color: "#B91C1C" }}>{error}</p>}
+      {items && items.length === 0 && (
+        <p className="text-xs py-3 text-center" style={{ color: MUTED }}>
+          Chưa có câu trả lời nào bị 👎 — tốt!
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {items?.map((it) => (
+          <div key={it.message_id} className="rounded-xl overflow-hidden"
+            style={{ background: "rgba(255,255,255,0.7)", border: "1px solid rgba(239,68,68,0.15)" }}>
+            <div className="flex items-start gap-2 px-3 py-2.5">
+              <button
+                onClick={() => setExpanded(expanded === it.message_id ? null : it.message_id)}
+                className="min-w-0 flex-1 text-left"
+              >
+                <p className="text-xs font-semibold truncate" style={{ color: INK }}>
+                  {it.question || "(không xác định câu hỏi)"}
+                </p>
+                <p className="text-[11px] mt-0.5 line-clamp-1" style={{ color: MUTED }}>
+                  {it.answer}
+                </p>
+              </button>
+              {it.in_eval_queue ? (
+                <span className="shrink-0 h-7 px-2 rounded-lg flex items-center gap-1 text-[11px] font-medium"
+                  style={{ background: "rgba(16,185,129,0.1)", color: "#059669" }}>
+                  <Check className="w-3.5 h-3.5" /> Đã thêm
+                </span>
+              ) : (
+                <button
+                  onClick={() => addToQueue(it.message_id)}
+                  disabled={queuing === it.message_id}
+                  title="Đưa vào bộ eval"
+                  className="shrink-0 h-7 px-2.5 rounded-lg flex items-center gap-1 text-[11px] font-semibold text-white transition-colors disabled:opacity-50"
+                  style={{ background: DATA_HUE }}
+                >
+                  {queuing === it.message_id
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <ClipboardCheck className="w-3.5 h-3.5" />}
+                  Vào eval
+                </button>
+              )}
+              <button
+                onClick={() => setExpanded(expanded === it.message_id ? null : it.message_id)}
+                className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:bg-black/5"
+              >
+                {expanded === it.message_id ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
+            </div>
+            {expanded === it.message_id && (
+              <div className="px-3 pb-3 pt-1 text-[11px] whitespace-pre-wrap leading-relaxed"
+                style={{ color: "#374151", borderTop: "1px solid rgba(239,68,68,0.1)" }}>
+                {it.answer}
+                {it.sources.length > 0 && (
+                  <p className="mt-2" style={{ color: MUTED }}>
+                    Nguồn: {it.sources.map((s) => s.title).join(" · ")}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -318,6 +432,9 @@ export default function DashboardPage() {
               </p>
             </div>
           </div>
+
+          {/* Downvoted answers → eval queue (feedback loop) */}
+          <DownvotedPanel days={days} />
         </>
       )}
     </div>
