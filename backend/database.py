@@ -52,6 +52,8 @@ class Message(Base):
     feedback     = Column(String, nullable=True)
     # Multi-hop reasoning steps shown in the UI (assistant messages only).
     steps_json   = Column(Text, default="[]")
+    # Suggested follow-up questions (click-to-ask chips, assistant only).
+    suggestions_json = Column(Text, default="[]")
     created_at   = Column(DateTime, default=datetime.utcnow)
     session      = relationship("ChatSession", back_populates="messages")
 
@@ -103,6 +105,9 @@ def create_tables():
             conn.commit()
         if "steps_json" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN steps_json TEXT DEFAULT '[]'"))
+            conn.commit()
+        if "suggestions_json" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN suggestions_json TEXT DEFAULT '[]'"))
             conn.commit()
 
 

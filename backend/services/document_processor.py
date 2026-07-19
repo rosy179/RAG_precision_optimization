@@ -1,9 +1,13 @@
 """
 Multi-format document ingestion:
-  PDF     → pdfplumber
-  URL     → requests + BeautifulSoup
-  Image   → OpenAI GPT-4o Vision
-  Audio   → OpenAI Whisper transcription
+  PDF          → pdfplumber (+ GPT-4o Vision OCR fallback for scanned pages)
+  DOCX         → python-docx (paragraphs + tables)
+  PPTX         → python-pptx (slide text + tables + notes)
+  XLSX         → openpyxl (sheets flattened to rows)
+  TXT/Markdown → decode as text
+  URL          → requests + BeautifulSoup
+  Image        → OpenAI GPT-4o Vision
+  Audio        → OpenAI Whisper transcription
 """
 
 import os
@@ -26,7 +30,16 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
 
 AUDIO_EXTENSIONS   = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
 IMAGE_EXTENSIONS   = {".png", ".jpg", ".jpeg", ".webp"}
-ALLOWED_EXTENSIONS = {".pdf", ".txt"} | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS
+# Plain-text family (decoded directly) and Office XML family (parsed).
+TEXT_EXTENSIONS    = {".txt", ".md", ".markdown"}
+OFFICE_EXTENSIONS  = {".docx", ".pptx", ".xlsx"}
+ALLOWED_EXTENSIONS = ({".pdf"} | TEXT_EXTENSIONS | OFFICE_EXTENSIONS
+                      | IMAGE_EXTENSIONS | AUDIO_EXTENSIONS)
+
+
+def _has_api_key() -> bool:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    return bool(api_key) and not api_key.startswith("sk-your")
 
 
 def _make_doc_id(name: str) -> str:
@@ -119,27 +132,82 @@ def _clean_text(text: str) -> str:
 
 # ── Format Handlers ───────────────────────────────────────
 
+# A page whose extractable text is shorter than this is treated as scanned
+# (image-only) and sent through OCR — pdfplumber returns "" or a stray
+# header for such pages, which used to index as 0 useful chunks silently.
+_MIN_PAGE_TEXT_CHARS = 40
+
+
 def process_pdf(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     """
     Returns (chunks, doc_summary).
+
+    Pages with a real text layer are read by pdfplumber; pages with (almost)
+    no extractable text are assumed scanned and OCR'd via GPT-4o Vision, so a
+    scanned PDF no longer indexes as zero chunks in silence.
     """
     import pdfplumber, io
-    # Track how many words each page contributes so chunks can be tagged
-    # with the page they start on (viewer jumps straight to it).
-    page_word_starts: list[int] = []
-    words: list[str] = []
+    # Per-page text ("" for pages with no usable text layer → OCR candidates).
+    page_texts: list[str] = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            page_word_starts.append(len(words))
-            t = page.extract_text()
-            if t:
-                words.extend(_clean_text(t).split())
+            t = page.extract_text() or ""
+            page_texts.append(_clean_text(t) if len(t.strip()) >= _MIN_PAGE_TEXT_CHARS else "")
+
+    # Splice OCR text into the image-only pages, preserving page order.
+    scanned_pages = [i for i, t in enumerate(page_texts) if not t]
+    if scanned_pages and _has_api_key():
+        for pnum, text in _ocr_pdf_pages(file_bytes, scanned_pages, filename).items():
+            page_texts[pnum] = text
+
+    # Tag each chunk with the 1-based page its first word starts on, so the
+    # viewer can jump straight there.
+    page_word_starts: list[int] = []
+    words: list[str] = []
+    for t in page_texts:
+        page_word_starts.append(len(words))
+        words.extend(t.split())
+
     full_text = " ".join(words)
     doc_id = _make_doc_id(filename)
     chunks = _sliding_window_chunks(full_text, doc_id, filename, "pdf",
                                     page_word_starts=page_word_starts)
     summary = _generate_summary(full_text[:4000], filename)
     return chunks, summary
+
+
+def _ocr_pdf_pages(file_bytes: bytes, page_indices: list[int],
+                   filename: str) -> dict[int, str]:
+    """Render the given 0-based PDF pages to images (PyMuPDF, 2x zoom for
+    legibility) and OCR each via GPT-4o Vision. Returns {page_index: text}
+    for pages that yielded text. Best-effort: a failed page is skipped."""
+    import fitz  # PyMuPDF
+
+    out: dict[int, str] = {}
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception:
+        return out
+    # Cap the OCR work so a huge scanned PDF can't run up an unbounded bill.
+    wanted = set(page_indices[:30])
+    try:
+        zoom = fitz.Matrix(2, 2)
+        for pnum in range(doc.page_count):
+            if pnum not in wanted:
+                continue
+            try:
+                png = doc.load_page(pnum).get_pixmap(matrix=zoom).tobytes("png")
+                # The OCR prompt returns "" for a blank page, so any non-empty
+                # transcription is real text (unlike the text-layer heuristic,
+                # this is not gated on _MIN_PAGE_TEXT_CHARS).
+                text = _clean_text(_vision_extract_text(png, "image/png"))
+                if text:
+                    out[pnum] = text
+            except Exception:
+                continue
+    finally:
+        doc.close()
+    return out
 
 
 # URL ingestion download cap — bounds both memory use and what an SSRF
@@ -271,29 +339,49 @@ def process_url(url: str) -> tuple[list[dict], str]:
     return chunks, summary
 
 
+_VISION_DESCRIBE_PROMPT = (
+    "You are a technical knowledge base assistant. Describe this image/diagram "
+    "in detail for indexing purposes. Include: all text labels, values, trends, "
+    "components, relationships, and key technical insights. Be thorough."
+)
+_VISION_OCR_PROMPT = (
+    "Transcribe ALL text visible in this document page exactly, preserving "
+    "reading order, headings, lists and table structure. Output only the "
+    "transcribed text, no commentary. If the page has no readable text, output "
+    "nothing."
+)
+
+
+def _vision_call(image_bytes: bytes, mime: str, prompt: str,
+                 max_tokens: int = 1000) -> str:
+    """One GPT-4o Vision call over an inline base64 image. Callers must
+    ensure an API key exists (_has_api_key)."""
+    from openai import OpenAI
+    b64 = base64.b64encode(image_bytes).decode()
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text", "text": prompt},
+        ]}],
+        max_tokens=max_tokens,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _vision_extract_text(image_bytes: bytes, mime: str) -> str:
+    """OCR a rendered page image into plain text (scanned-PDF fallback)."""
+    return _vision_call(image_bytes, mime, _VISION_OCR_PROMPT, max_tokens=1500)
+
+
 def process_image(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key or api_key.startswith("sk-your"):
+    if not _has_api_key():
         description = f"[MOCK] Image description for {filename}"
     else:
-        from openai import OpenAI
-        b64 = base64.b64encode(file_bytes).decode()
         ext = Path(filename).suffix.lower().lstrip(".")
         mime = "image/png" if ext == "png" else "image/jpeg"
-        client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                {"type": "text", "text": (
-                    "You are a technical knowledge base assistant. Describe this image/diagram "
-                    "in detail for indexing purposes. Include: all text labels, values, trends, "
-                    "components, relationships, and key technical insights. Be thorough."
-                )},
-            ]}],
-            max_tokens=1000,
-        )
-        description = resp.choices[0].message.content.strip()
+        description = _vision_call(file_bytes, mime, _VISION_DESCRIBE_PROMPT)
 
     doc_id = _make_doc_id(filename)
     chunks = _sliding_window_chunks(description, doc_id, filename, "image")
@@ -323,10 +411,83 @@ def process_audio(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
     return chunks, summary
 
 
-def process_txt(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+def process_txt(file_bytes: bytes, filename: str,
+                source_type: str = "txt") -> tuple[list[dict], str]:
     text = _clean_text(file_bytes.decode("utf-8", errors="replace"))
     doc_id = _make_doc_id(filename)
-    chunks = _sliding_window_chunks(text, doc_id, filename, "txt")
+    chunks = _sliding_window_chunks(text, doc_id, filename, source_type)
+    summary = _generate_summary(text[:4000], filename)
+    return chunks, summary
+
+
+def process_docx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+    """Word .docx → paragraphs + table cells, in document order."""
+    import docx, io
+
+    document = docx.Document(io.BytesIO(file_bytes))
+    parts: list[str] = []
+    for para in document.paragraphs:
+        if para.text.strip():
+            parts.append(para.text)
+    for table in document.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+
+    text = _clean_text("\n".join(parts))
+    doc_id = _make_doc_id(filename)
+    chunks = _sliding_window_chunks(text, doc_id, filename, "docx")
+    summary = _generate_summary(text[:4000], filename)
+    return chunks, summary
+
+
+def process_pptx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+    """PowerPoint .pptx → per-slice text frames, tables and speaker notes."""
+    import pptx, io
+
+    presentation = pptx.Presentation(io.BytesIO(file_bytes))
+    parts: list[str] = []
+    for i, slide in enumerate(presentation.slides, 1):
+        parts.append(f"### Slide {i}")
+        for shape in slide.shapes:
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                parts.append(shape.text_frame.text)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+        notes = slide.notes_slide.notes_text_frame.text if slide.has_notes_slide else ""
+        if notes and notes.strip():
+            parts.append(f"(Ghi chú: {notes.strip()})")
+
+    text = _clean_text("\n".join(parts))
+    doc_id = _make_doc_id(filename)
+    chunks = _sliding_window_chunks(text, doc_id, filename, "pptx")
+    summary = _generate_summary(text[:4000], filename)
+    return chunks, summary
+
+
+def process_xlsx(file_bytes: bytes, filename: str) -> tuple[list[dict], str]:
+    """Excel .xlsx → each sheet flattened to 'col | col | col' rows."""
+    import openpyxl, io
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    parts: list[str] = []
+    try:
+        for ws in wb.worksheets:
+            parts.append(f"### {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if v is None else str(v) for v in row]
+                if any(c.strip() for c in cells):
+                    parts.append(" | ".join(cells).rstrip(" |"))
+    finally:
+        wb.close()
+
+    text = _clean_text("\n".join(parts))
+    doc_id = _make_doc_id(filename)
+    chunks = _sliding_window_chunks(text, doc_id, filename, "xlsx")
     summary = _generate_summary(text[:4000], filename)
     return chunks, summary
 
@@ -348,9 +509,20 @@ def process_file(file_bytes: bytes, filename: str,
     if ext in IMAGE_EXTENSIONS or content_type.startswith("image/"):
         chunks, summary = process_image(file_bytes, filename)
         return chunks, summary, "image"
-    if ext == ".txt" or content_type.startswith("text/"):
-        chunks, summary = process_txt(file_bytes, filename)
-        return chunks, summary, "txt"
+    if ext == ".docx":
+        chunks, summary = process_docx(file_bytes, filename)
+        return chunks, summary, "docx"
+    if ext == ".pptx":
+        chunks, summary = process_pptx(file_bytes, filename)
+        return chunks, summary, "pptx"
+    if ext == ".xlsx":
+        chunks, summary = process_xlsx(file_bytes, filename)
+        return chunks, summary, "xlsx"
+    # Markdown/txt and any remaining text/* payloads decode as plain text.
+    if ext in TEXT_EXTENSIONS or content_type.startswith("text/"):
+        source = "markdown" if ext in (".md", ".markdown") else "txt"
+        chunks, summary = process_txt(file_bytes, filename, source)
+        return chunks, summary, source
     raise ValueError(f"Unsupported file type: {ext or content_type or 'unknown'}")
 
 

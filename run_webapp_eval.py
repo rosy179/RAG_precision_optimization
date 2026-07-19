@@ -13,6 +13,7 @@ Usage:
   python run_webapp_eval.py --limit 10         # smoke run: answer + Ragas on 10 samples
   python run_webapp_eval.py                    # full run over the whole question file
   python run_webapp_eval.py --no-ragas         # answers only (no metric cost)
+  python run_webapp_eval.py --rescore          # re-run Ragas on the last run's answers
 
 Requires the KB corpus ingested (scripts/ingest_knowledge.py) and OPENAI_API_KEY.
 """
@@ -38,6 +39,9 @@ import openai
 
 QUESTIONS_PATH = ROOT / "data" / "webapp_eval_questions.json"
 RESULTS_PATH = ROOT / "results" / "webapp_eval_results.json"
+# Full rows of the last run INCLUDING contexts — lets --rescore re-run the
+# Ragas scoring (e.g. after a judge-config fix) without re-answering.
+ROWS_PATH = ROOT / "results" / "webapp_eval_rows_last.json"
 CORPUS_PATH = ROOT / "data" / "rag_dataset.json"
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
@@ -140,9 +144,9 @@ def generate_questions(target_en: int):
     print(f"\n[SAVED] {QUESTIONS_PATH} — {len(questions)} questions {by_lang}")
 
 
-def run_eval(limit: int | None, use_ragas: bool):
+def answer_questions(limit: int | None) -> list[dict]:
+    """Answer the eval questions through the live webapp pipeline."""
     from backend.services.user_rag import get_service, warm_up
-    from evaluation import run_ragas_evaluation
 
     if not QUESTIONS_PATH.exists():
         print(f"{QUESTIONS_PATH} not found — run with --generate first.")
@@ -185,6 +189,23 @@ def run_eval(limit: int | None, use_ragas: bool):
         rows.append({**q, "answer": answer, "contexts": contexts,
                      "latency_ms": ms, "status": status})
         print(f"  [{i}/{len(questions)}] ({q['lang']}) {ms:5d}ms  {q['question'][:60]}")
+    return rows
+
+
+def run_eval(limit: int | None, use_ragas: bool, rescore: bool = False):
+    from evaluation import run_ragas_evaluation
+
+    if rescore:
+        if not ROWS_PATH.exists():
+            print(f"{ROWS_PATH} not found — run a full eval first.")
+            sys.exit(1)
+        rows = json.loads(ROWS_PATH.read_text(encoding="utf-8"))
+        print(f"Re-scoring {len(rows)} saved answers (no re-answering).")
+    else:
+        rows = answer_questions(limit)
+        ROWS_PATH.parent.mkdir(exist_ok=True)
+        ROWS_PATH.write_text(json.dumps(rows, ensure_ascii=False),
+                             encoding="utf-8")
 
     ok = [r for r in rows if r["status"] == "ok"]
     report: dict = {
@@ -241,9 +262,11 @@ if __name__ == "__main__":
                     help="generate N English questions from the KB corpus (+10 VI, +10 JA)")
     ap.add_argument("--limit", type=int, help="evaluate only this many questions")
     ap.add_argument("--no-ragas", action="store_true", help="answers only, skip Ragas")
+    ap.add_argument("--rescore", action="store_true",
+                    help="re-run Ragas on the last run's saved answers (no re-answering)")
     args = ap.parse_args()
 
     if args.generate:
         generate_questions(args.generate)
     else:
-        run_eval(args.limit, use_ragas=not args.no_ragas)
+        run_eval(args.limit, use_ragas=not args.no_ragas, rescore=args.rescore)

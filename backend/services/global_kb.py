@@ -7,7 +7,6 @@ per-user session-scoped collections in user_rag.py. Filled via the
 merges retrieval from the session's own documents and this KB.
 """
 
-import os
 import re
 import logging
 import threading
@@ -16,16 +15,13 @@ from pathlib import Path
 from typing import Optional
 
 import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction, SentenceTransformerEmbeddingFunction
 from rank_bm25 import BM25Okapi
 
-from dotenv import load_dotenv
-load_dotenv()
+from backend.services.embeddings import get_embedding_function
 
 log = logging.getLogger("rag.kb")
 
-DB_PATH     = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
+DB_PATH = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
 
 _kb: Optional["GlobalKBService"] = None
 _kb_lock = threading.Lock()
@@ -58,11 +54,8 @@ class GlobalKBService:
         DB_PATH.mkdir(parents=True, exist_ok=True)
         self._chroma = chromadb.PersistentClient(path=str(DB_PATH))
 
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        if api_key and not api_key.startswith("sk-your"):
-            embed_fn = OpenAIEmbeddingFunction(api_key=api_key, model_name=EMBED_MODEL)
-        else:
-            embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        # Shared factory — same vector space as the per-user collections.
+        embed_fn = get_embedding_function()
 
         self._chunk_col = self._chroma.get_or_create_collection(
             "global_kb_chunks",
@@ -175,6 +168,73 @@ class GlobalKBService:
 
     def chunk_count(self) -> int:
         return len(self._chunks_store)
+
+    # ── Chunk-level editing (admin precision tooling) ──────
+
+    def list_chunks(self, doc_id: str) -> list[dict] | None:
+        """Every parsed chunk of a document in reading order, for the admin
+        chunk editor. Returns None if the document has no chunks."""
+        res = self._chunk_col.get(where={"doc_id": doc_id},
+                                  include=["documents", "metadatas"])
+        if not res["ids"]:
+            return None
+        rows = sorted(
+            zip(res["ids"], res["documents"], res["metadatas"]),
+            key=lambda r: r[2].get("chunk_index", 0),
+        )
+        return [{
+            "id": cid,
+            "text": text,
+            "chunk_index": meta.get("chunk_index", 0),
+            **({"page": meta["page"]} if "page" in meta else {}),
+        } for cid, text, meta in rows]
+
+    def update_chunk(self, doc_id: str, chunk_id: str, new_text: str) -> bool:
+        """Replace a chunk's text (re-embeds it) and refresh the in-memory
+        store + BM25. Returns False if the chunk doesn't belong to the doc."""
+        new_text = new_text.strip()
+        if not new_text:
+            raise ValueError("Nội dung chunk không được để trống")
+        existing = self._chunk_col.get(ids=[chunk_id], include=["metadatas"])
+        if not existing["ids"]:
+            return False
+        meta = existing["metadatas"][0] if existing["metadatas"] else {}
+        if meta.get("doc_id") != doc_id:
+            return False
+        with self._write_lock:
+            # upsert with the same id + metadata re-embeds the new text
+            self._chunk_col.upsert(ids=[chunk_id], documents=[new_text],
+                                   metadatas=[meta])
+            self._chunks_store = [
+                {**c, "text": new_text, "tokens": _tokenize(new_text)}
+                if c["id"] == chunk_id else c
+                for c in self._chunks_store
+            ]
+            self._rebuild_bm25()
+            self._version += 1
+        return True
+
+    def delete_chunk(self, doc_id: str, chunk_id: str) -> bool:
+        """Remove one junk chunk. Returns False if it doesn't belong to the
+        doc; keeps the document even if it becomes empty (delete the doc for
+        that). Updates the registry chunk_count."""
+        existing = self._chunk_col.get(ids=[chunk_id], include=["metadatas"])
+        if not existing["ids"]:
+            return False
+        meta = existing["metadatas"][0] if existing["metadatas"] else {}
+        if meta.get("doc_id") != doc_id:
+            return False
+        with self._write_lock:
+            self._chunk_col.delete(ids=[chunk_id])
+            self._chunks_store = [c for c in self._chunks_store if c["id"] != chunk_id]
+            self._doc_registry = [
+                {**d, "chunk_count": max(0, d["chunk_count"] - 1)}
+                if d["id"] == doc_id else d
+                for d in self._doc_registry
+            ]
+            self._rebuild_bm25()
+            self._version += 1
+        return True
 
     def is_empty(self) -> bool:
         return not self._chunks_store

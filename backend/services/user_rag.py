@@ -25,21 +25,27 @@ if _SRC not in sys.path:
 
 import openai
 import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction, SentenceTransformerEmbeddingFunction
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
 from dotenv import load_dotenv
 load_dotenv()
 
+from backend.services.embeddings import get_embedding_function
 from backend.services.global_kb import get_kb
 
 log = logging.getLogger("rag.user")
 
-DB_PATH     = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-ada-002")
-LLM_MODEL   = os.getenv("LLM_MODEL", "gpt-4o-mini")
-RERANKER    = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+DB_PATH   = Path(__file__).parent.parent.parent / "data" / "chroma_db_users"
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# Multilingual cross-encoder: scores VI/JA/EN query-passage pairs directly,
+# so retrieval no longer needs an English translation of the query.
+# mmarco-mMiniLMv2 (~120MB) reranks 16 pairs in ~4s on this 4-thread CPU;
+# BAAI/bge-reranker-v2-m3 is stronger but needs a GPU (57s/query on CPU) —
+# switch via RERANKER_MODEL when deploying on GPU hardware.
+RERANKER         = os.getenv("RERANKER_MODEL",
+                             "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
+RERANKER_MAX_LEN = 512  # chunks are ~512 tokens; caps CPU latency per pair
 
 # Answer cache: repeat questions in the same (session, source-filter, KB)
 # scope are served from memory instead of re-running the pipeline.
@@ -103,18 +109,18 @@ Truy vấn con: {sub_question}
 
 Trả lời ngắn:"""
 
-# Query preparation, ONE call doing two formerly sequential round-trips:
-# (a) cross-lingual fix — the corpus is predominantly English (ada-002
-# cross-lingual similarity is weak, BM25 has zero term overlap, the ms-marco
-# CrossEncoder only understands English), so retrieval also runs an English
-# variant of the query (the ANSWER language still follows the question);
-# (b) follow-up condensing — "dịch sang tiếng Nhật", "nói rõ hơn ý 2" carry
-# no retrieval signal, so they are rewritten standalone using the history.
-QUERY_PREP_PROMPT = """\
-Bạn nhận lịch sử hội thoại (có thể rỗng) và một câu hỏi mới. Trả về JSON có đúng 2 khóa:
-- "query": câu hỏi viết lại thành MỘT câu truy vấn tìm kiếm độc lập, nêu rõ chủ đề đang nói tới (dựa vào lịch sử nếu câu hỏi phụ thuộc ngữ cảnh; nếu đã độc lập và rõ ràng thì giữ NGUYÊN VĂN). Bỏ các yêu cầu về cách trình bày (ví dụ: "dịch sang tiếng Nhật", "tóm tắt lại", "viết ngắn hơn") — chỉ giữ chủ đề nội dung, giữ ngôn ngữ gốc.
-- "query_en": bản dịch tiếng Anh của "query" để tìm trong kho tài liệu tiếng Anh; giữ nguyên tên riêng, thuật ngữ kỹ thuật, số liệu. Nếu "query" đã là tiếng Anh thì lặp lại nguyên văn.
-Chỉ trả về JSON, không giải thích."""
+# Follow-up condensing — "dịch sang tiếng Nhật", "nói rõ hơn ý 2" carry no
+# retrieval signal, so they are rewritten standalone using the history.
+# (The old English-translation step is gone: BGE-M3 embeddings and the
+# multilingual cross-encoder (RERANKER) score VI/JA queries against the EN
+# corpus directly, saving one LLM round-trip per non-English question.)
+CONDENSE_PROMPT = """\
+Bạn nhận lịch sử hội thoại và một câu hỏi mới. Viết lại câu hỏi thành MỘT câu \
+truy vấn tìm kiếm độc lập, nêu rõ chủ đề đang nói tới (dựa vào lịch sử nếu câu \
+hỏi phụ thuộc ngữ cảnh; nếu đã độc lập và rõ ràng thì giữ NGUYÊN VĂN). Bỏ các \
+yêu cầu về cách trình bày (ví dụ: "dịch sang tiếng Nhật", "tóm tắt lại", "viết \
+ngắn hơn") — chỉ giữ chủ đề nội dung, giữ ngôn ngữ gốc. Chỉ trả về câu truy vấn \
+duy nhất, không giải thích."""
 
 # "Summarize this link/document"-type questions carry no topical signal —
 # similarity search returns noise for them (often unrelated global-KB chunks).
@@ -177,6 +183,18 @@ Bạn nhận "Câu trả lời trước" của trợ lý và một yêu cầu tr
 - Khi dịch: giữ nguyên tên riêng, tên sản phẩm và thuật ngữ kỹ thuật thông dụng; phần còn lại dịch tự nhiên, trôi chảy.
 - Chỉ trả về kết quả, không thêm lời giải thích hay lời dẫn."""
 
+# Suggested follow-up questions (ChatPDF/NotebookLM-style chips under the
+# answer). Suggestions must be answerable from the SHOWN sources — a chip
+# that retrieval can't back produces a bad answer on click.
+SUGGEST_PROMPT = """\
+Bạn nhận câu hỏi của người dùng, câu trả lời của trợ lý và danh sách nguồn tài liệu.
+Đề xuất đúng 3 câu hỏi tiếp theo ngắn gọn (mỗi câu tối đa 15 từ) mà người dùng \
+có thể muốn hỏi tiếp:
+- Chỉ hỏi điều trả lời được từ các nguồn tài liệu đã cho — không hỏi ngoài phạm vi.
+- Không lặp lại câu đã hỏi; đào sâu chi tiết, khía cạnh liên quan hoặc so sánh.
+- Dùng cùng ngôn ngữ với câu hỏi gốc.
+Chỉ trả về JSON: {"questions": ["...", "...", "..."]}"""
+
 
 # Shared reranker (loaded once at startup)
 _reranker: Optional[CrossEncoder] = None
@@ -190,14 +208,15 @@ _instances_lock = threading.Lock()
 
 def warm_up():
     global _reranker
-    log.info("Loading CrossEncoder reranker...")
+    log.info("Loading CrossEncoder reranker (%s)...", RERANKER)
     try:
         # Local cache first — HF Hub outages must not block startup.
-        _reranker = CrossEncoder(RERANKER, local_files_only=True)
+        _reranker = CrossEncoder(RERANKER, max_length=RERANKER_MAX_LEN,
+                                 local_files_only=True)
         log.info("Reranker ready (local cache).")
     except Exception:
         try:
-            _reranker = CrossEncoder(RERANKER)
+            _reranker = CrossEncoder(RERANKER, max_length=RERANKER_MAX_LEN)
             log.info("Reranker ready.")
         except Exception as e:
             log.error("Reranker load failed: %s", e)
@@ -313,12 +332,17 @@ def _chunks_to_sources(chunks: list[dict]) -> list[dict]:
 def _display_score(chunk: dict) -> float:
     """Normalize a chunk's relevance score to 0-1 for the UI badge.
 
-    Cross-encoder rerank scores are raw, unbounded logits — squash them
-    through a sigmoid. Semantic scores (1 - distance) can dip below 0
-    depending on the distance metric, so clamp instead.
+    Depending on the model config, sentence-transformers ≥4 returns rerank
+    scores either sigmoid-activated in [0, 1] (bge-reranker-v2-m3) or as
+    raw unbounded logits (mmarco-mMiniLMv2) — squash only the latter.
+    Semantic scores (1 - distance) can dip below 0 depending on the
+    distance metric, so clamp instead.
     """
     if "rerank_score" in chunk:
-        return round(1.0 / (1.0 + math.exp(-chunk["rerank_score"])), 4)
+        s = chunk["rerank_score"]
+        if not 0.0 <= s <= 1.0:
+            s = 1.0 / (1.0 + math.exp(-s))
+        return round(s, 4)
     return round(max(0.0, min(1.0, chunk.get("score", 0.0))), 4)
 
 
@@ -365,11 +389,9 @@ class UserRAGService:
         DB_PATH.mkdir(parents=True, exist_ok=True)
         self._chroma = chromadb.PersistentClient(path=str(DB_PATH))
 
-        if self._api_key and not self._api_key.startswith("sk-your"):
-            embed_fn = OpenAIEmbeddingFunction(api_key=self._api_key, model_name=EMBED_MODEL)
-        else:
-            embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        # Kept for the answer cache's question-similarity checks.
+        # Shared factory — same vector space as the global KB. Also kept
+        # for the answer cache's question-similarity checks.
+        embed_fn = get_embedding_function()
         self._embed_fn = embed_fn
 
         self._chunk_col   = self._chroma.get_or_create_collection(
@@ -592,23 +614,19 @@ class UserRAGService:
                 digest["retrieval_ms"] = int((time.time() - t0) * 1000)
                 return digest
 
-        # One LLM call prepares the search queries: condenses follow-ups
-        # ("dịch sang tiếng Nhật", "nói rõ hơn") into a standalone query via
-        # history, and adds an English variant for non-English questions.
-        # Generation still sees the original question + history. Condensing
-        # is skipped when the message carries its own attachments: the
-        # question is about THEM, and history (about earlier documents)
-        # would steer the rewritten query back to the old topic.
-        queries = self._prepare_queries(question, history,
-                                        condense=not attached_doc_ids,
-                                        usage=usage)
-        # English-side query: the CrossEncoder, HyDE and the keyword-based
-        # complexity heuristic all only work well in English.
-        q_en = queries[-1]
+        # Condense follow-ups ("nói rõ hơn ý 2") into a standalone query via
+        # history — generation still sees the original question + history.
+        # Skipped when the message carries its own attachments: the question
+        # is about THEM, and history (about earlier documents) would steer
+        # the rewritten query back to the old topic. The whole retrieval
+        # stack (BGE-M3 + multilingual reranker + multilingual heuristic)
+        # works on the original language, so no English variant is needed.
+        query = (question if attached_doc_ids
+                 else self._condense_query(question, history, usage=usage))
 
         # Layer 1 — Adaptive Router
         from adaptive_rag import classify_heuristic
-        complexity = classify_heuristic(q_en)
+        complexity = classify_heuristic(query)
 
         # Layer 2 — Hierarchical: find relevant docs by summary, separately
         # per pool (session docs and global KB docs live in different
@@ -616,17 +634,12 @@ class UserRAGService:
         top_k_docs = min(5, len(session_docs))
         relevant_doc_ids: list[str] = []
         if top_k_docs > 0:
-            kwargs = {"query_texts": queries, "n_results": top_k_docs}
+            kwargs = {"query_texts": [query], "n_results": top_k_docs}
             if session_filter:
                 kwargs["where"] = session_filter
             summary_res = self._summary_col.query(**kwargs)
-            # Union of both language variants' shortlists, order-preserving
-            seen_docs: set = set()
-            for id_list in (summary_res["ids"] or []):
-                for did in id_list:
-                    if did not in seen_docs:
-                        seen_docs.add(did)
-                        relevant_doc_ids.append(did)
+            if summary_res["ids"]:
+                relevant_doc_ids = list(summary_res["ids"][0])
         if allowed_ids is not None:
             # The summary shortlist isn't checkbox-aware — constrain it, and
             # never fall through to an unfiltered chunk search.
@@ -638,7 +651,7 @@ class UserRAGService:
             valid = {d["id"] for d in session_docs}
             boost = [i for i in attached_doc_ids if i in valid]
             relevant_doc_ids = list(dict.fromkeys(boost + relevant_doc_ids))
-        kb_doc_ids = kb.search_summaries(queries, top_k=5) if kb_enabled else []
+        kb_doc_ids = kb.search_summaries(query, top_k=5) if kb_enabled else []
 
         # Layer 3 — Advanced: Semantic + BM25 + RRF, over both pools
         semantic_chunks = []
@@ -650,44 +663,37 @@ class UserRAGService:
                 filters.append({"doc_id": {"$in": relevant_doc_ids}})
             where_filter = filters[0] if len(filters) == 1 else ({"$and": filters} if filters else None)
 
-            kwargs = {"query_texts": queries, "n_results": min(20, len(session_chunks))}
+            kwargs = {"query_texts": [query], "n_results": min(20, len(session_chunks))}
             if where_filter:
                 kwargs["where"] = where_filter
             semantic_res = self._chunk_col.query(**kwargs)
 
-            # Both language variants search in one Chroma call; a chunk hit
-            # by both keeps its best score.
-            best: dict[str, dict] = {}
-            for qi in range(len(semantic_res["ids"] or [])):
-                for i, chunk_id in enumerate(semantic_res["ids"][qi]):
-                    meta = semantic_res["metadatas"][qi][i] if semantic_res["metadatas"] else {}
-                    dist = semantic_res["distances"][qi][i] if semantic_res["distances"] else 1.0
-                    score = round(1.0 - float(dist), 4)
-                    if chunk_id in best and best[chunk_id]["score"] >= score:
-                        continue
-                    best[chunk_id] = {
+            if semantic_res["ids"] and semantic_res["ids"][0]:
+                for i, chunk_id in enumerate(semantic_res["ids"][0]):
+                    meta = semantic_res["metadatas"][0][i] if semantic_res["metadatas"] else {}
+                    dist = semantic_res["distances"][0][i] if semantic_res["distances"] else 1.0
+                    semantic_chunks.append({
                         "id":     chunk_id,
-                        "text":   semantic_res["documents"][qi][i],
+                        "text":   semantic_res["documents"][0][i],
                         "title":  meta.get("title", ""),
                         "source": meta.get("source", ""),
                         "doc_id": meta.get("doc_id", ""),
                         "scope":  "session",
-                        "score":  score,
+                        "score":  round(1.0 - float(dist), 4),
                         **({"page": meta["page"]} if "page" in meta else {}),
-                    }
-            semantic_chunks = list(best.values())
+                    })
 
         # Both collections use the same embedding model and cosine space,
         # so their (1 - distance) scores are directly comparable.
-        kb_semantic = kb.search_semantic(queries, n_results=20,
+        kb_semantic = kb.search_semantic(query, n_results=20,
                                          doc_ids=kb_doc_ids or None) if kb_enabled else []
         semantic_chunks = sorted(semantic_chunks + kb_semantic,
                                  key=lambda c: c["score"], reverse=True)[:20]
 
         bm25_chunks = _merge_lexical(
-            self._bm25_search(queries, n=20, session_id=session_id,
+            self._bm25_search(query, n=20, session_id=session_id,
                               allowed_doc_ids=allowed_ids),
-            kb.search_bm25(queries, n=20) if kb_enabled else [],
+            kb.search_bm25(query, n=20) if kb_enabled else [],
         )
 
         from hybrid_rag import reciprocal_rank_fusion
@@ -697,15 +703,15 @@ class UserRAGService:
         fused = reciprocal_rank_fusion(semantic_chunks, bm25_chunks, top_k=top_k * 4)
         _reattach_chunk_fields(fused, bm25_chunks, semantic_chunks)
 
-        # Rerank ALWAYS (against the English-side query — the ms-marco
-        # CrossEncoder scores non-English pairs as noise). Skipping rerank
+        # Rerank ALWAYS (the reranker is multilingual, so pairs are
+        # scored in the query's original language). Skipping rerank
         # for "simple" questions saved ~0.5s but let near-duplicate facts
         # outrank the exact answer chunk — accuracy wins here.
         # The CE ordering is BLENDED with the fusion ordering (RRF over both
         # rank lists): when the corpus holds two competing near-answers, one
         # CE miss must not evict the chunk BM25+semantic both agreed on.
         if _reranker and len(fused) > 1:
-            pairs = [(q_en, c["text"]) for c in fused]
+            pairs = [(query, c["text"]) for c in fused]
             scores = _reranker.predict(pairs)
             ce_rank = {i: r for r, i in enumerate(
                 sorted(range(len(fused)), key=lambda i: -float(scores[i])))}
@@ -716,12 +722,15 @@ class UserRAGService:
 
         top_chunks = fused[:top_k]
 
-        # Layer 4 — Iterative fallback: if best score < 0.5, HyDE re-query
+        # Layer 4 — Iterative fallback: HyDE re-query when nothing relevant
+        # was found. Threshold tuned to BGE-M3's cosine scale (relevant
+        # ~0.55-0.7, cross-lingual hits can dip to ~0.5, unrelated <0.45) —
+        # the old 0.5 (ada-002 scale) would fire on good VI/JA retrievals.
         best_score = top_chunks[0].get("score", 1.0) if top_chunks else 0.0
-        if best_score < 0.5:
+        if best_score < 0.4:
             from query_expansion import generate_hypothetical_doc
-            hyde = generate_hypothetical_doc(q_en)
-            if hyde and hyde != q_en:
+            hyde = generate_hypothetical_doc(query)
+            if hyde and hyde != query:
                 hyde_chunks = []
                 if session_chunks:
                     hyde_filters = []
@@ -823,6 +832,44 @@ class UserRAGService:
             if event.choices and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
             _add_usage(usage, event)
+
+    def suggest_questions(self, question: str, answer: str,
+                          sources: list[dict],
+                          usage: dict | None = None) -> list[str]:
+        """Up to 3 follow-up questions for the click-to-ask chips.
+
+        One cheap LLM call from the question + answer + source snippets;
+        callers run it AFTER the done event so it never delays the answer.
+        Returns [] on any failure — the feature degrades to nothing.
+        """
+        if not sources:
+            return []
+        if not self._api_key or self._api_key.startswith("sk-your"):
+            return ["Chủ đề này có những ứng dụng nào?",
+                    "Có hạn chế hay nhược điểm gì không?",
+                    "So sánh với các phương pháp tương tự?"]
+        context = "\n".join(f"- {s.get('title', '')}: {s.get('snippet', '')}"
+                            for s in sources[:5])
+        try:
+            client = openai.OpenAI(api_key=self._api_key)
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": SUGGEST_PROMPT},
+                    {"role": "user", "content":
+                        f"Câu hỏi: {question}\n\nCâu trả lời: {answer[:1500]}\n\n"
+                        f"Nguồn tài liệu:\n{context}"},
+                ],
+                temperature=0.7,
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+            _add_usage(usage, res)
+            data = json.loads(res.choices[0].message.content or "{}")
+            return [str(q).strip() for q in data.get("questions", [])
+                    if str(q).strip()][:3]
+        except Exception:
+            return []
 
     # ── Multi-Hop (Layer 6) ────────────────────────────────
 
@@ -1025,26 +1072,17 @@ class UserRAGService:
         return [{**{k: v for k, v in c.items() if k != "tokens"},
                  "scope": "session", "score": 1.0} for c in out]
 
-    def _prepare_queries(self, question: str, history: list[dict],
-                         condense: bool = True,
-                         usage: dict | None = None) -> list[str]:
-        """Standalone search query + English variant in ONE LLM call.
-
-        Follow-ups are condensed with the history, and non-English questions
-        (cheap proxy: isascii() fails on VI diacritics / CJK) get an English
-        twin for the EN-heavy corpus and CrossEncoder — formerly two
-        sequential round-trips of TTFT. Skipped entirely when neither is
-        needed; mock mode and any failure fall back to the raw question.
-        """
-        needs_condense = condense and bool(history)
-        needs_english = not question.isascii()
-        if not (needs_condense or needs_english):
-            return [question]
-        if not self._api_key or self._api_key.startswith("sk-your"):
-            return [question]
+    def _condense_query(self, question: str, history: list[dict],
+                        usage: dict | None = None) -> str:
+        """Rewrite a history-dependent follow-up into a standalone search
+        query in ONE LLM call. Returns the question unchanged when there is
+        no history (nothing to condense), in mock mode, and on any failure.
+        Generation still sees the original question + history."""
+        if not history or not self._api_key or self._api_key.startswith("sk-your"):
+            return question
         convo = "\n".join(
             f"{'Người dùng' if m.get('role') == 'user' else 'Trợ lý'}: {str(m['content'])[:500]}"
-            for m in (history[-6:] if needs_condense else [])
+            for m in history[-6:]
             if m.get("role") in ("user", "assistant") and m.get("content")
         )
         try:
@@ -1052,23 +1090,17 @@ class UserRAGService:
             res = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
-                    {"role": "system", "content": QUERY_PREP_PROMPT},
+                    {"role": "system", "content": CONDENSE_PROMPT},
                     {"role": "user", "content":
                         f"Lịch sử hội thoại:\n{convo or '(không có)'}\n\nCâu hỏi mới: {question}"},
                 ],
                 temperature=0.0,
-                max_tokens=250,
-                response_format={"type": "json_object"},
+                max_tokens=200,
             )
             _add_usage(usage, res)
-            data = json.loads(res.choices[0].message.content or "{}")
-            q = str(data.get("query") or "").strip() or question
-            q_en = str(data.get("query_en") or "").strip()
-            if q_en and q_en.lower() != q.lower():
-                return [q, q_en]
-            return [q]
+            return (res.choices[0].message.content or "").strip() or question
         except Exception:
-            return [question]
+            return question
 
     # ── Answer cache ───────────────────────────────────────
 
@@ -1126,7 +1158,8 @@ class UserRAGService:
     def cache_store(self, question: str, session_id: str | None,
                     include_doc_ids: list[str] | None, use_global_kb: bool,
                     answer: str, sources: list[dict], complexity: str,
-                    steps: list[dict] | None = None) -> None:
+                    steps: list[dict] | None = None,
+                    suggestions: list[str] | None = None) -> None:
         scope = self._cache_scope(session_id, include_doc_ids, use_global_kb)
         q_norm = " ".join(question.lower().split())
         entry = {
@@ -1134,6 +1167,7 @@ class UserRAGService:
             "ts": time.time(), "emb": self._embed_question(question),
             "answer": answer, "sources": sources,
             "complexity": complexity, "steps": steps or [],
+            "suggestions": suggestions or [],
         }
         key = hashlib.sha1(repr((scope, q_norm)).encode()).hexdigest()
         with self._lock:
