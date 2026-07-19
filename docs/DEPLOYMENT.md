@@ -33,14 +33,20 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-OPENAI_API_KEY=sk-...          # Required for embeddings + generation
+OPENAI_API_KEY=sk-...          # Required for generation (LLM)
 LLM_MODEL=gpt-4o-mini          # Recommended: cost-effective, fast
-EMBED_MODEL=text-embedding-ada-002
+EMBED_MODEL=BAAI/bge-m3        # Local multilingual embeddings (free). OpenAI
+                               # models (text-embedding-3-large) also accepted.
+RERANKER_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+                               # On GPU hardware, prefer BAAI/bge-reranker-v2-m3
 CHUNK_SIZE=512
 CHUNK_OVERLAP=50
 TOP_K=3
 RETRIEVE_DEPTH=20
 ```
+
+> Đổi `EMBED_MODEL` sau khi đã có dữ liệu → phải chạy
+> `python scripts/reembed_collections.py` (backup + re-embed toàn bộ Chroma).
 
 ### Build vector index (one-time)
 
