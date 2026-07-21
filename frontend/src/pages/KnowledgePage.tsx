@@ -16,6 +16,8 @@ interface UploadStatus {
   name: string;
   status: "uploading" | "done" | "error";
   detail?: string;
+  /** Upload progress 0–100 (bytes sent); 100 = server chunking/indexing. */
+  progress?: number;
 }
 
 const typeIcon = (type: string) => {
@@ -64,11 +66,13 @@ export default function KnowledgePage() {
   const uploadFiles = useCallback(async (files: File[]) => {
     for (const file of files) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setUploads((p) => [...p, { id, name: file.name, status: "uploading" }]);
+      setUploads((p) => [...p, { id, name: file.name, status: "uploading", progress: 0 }]);
       try {
-        const res = await knowledgeAPI.uploadFile(file);
+        const res = await knowledgeAPI.uploadFile(file, (pct) =>
+          setUploads((p) => p.map((u) => (u.id === id ? { ...u, progress: pct } : u)))
+        );
         setUploads((p) => p.map((u) =>
-          u.id === id ? { ...u, status: "done" as const, detail: `${res.chunk_count} chunks` } : u
+          u.id === id ? { ...u, status: "done" as const, progress: 100, detail: `${res.chunk_count} chunks` } : u
         ));
         load();
       } catch (e: any) {
@@ -245,7 +249,7 @@ export default function KnowledgePage() {
                 {uploads.map((u) => (
                   <span
                     key={u.id}
-                    className="flex items-center gap-1.5 text-xs rounded-xl px-3 py-1.5 max-w-[300px]"
+                    className="relative overflow-hidden flex items-center gap-1.5 text-xs rounded-xl px-3 py-1.5 max-w-[300px]"
                     style={
                       u.status === "error"
                         ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#EF4444" }
@@ -256,7 +260,9 @@ export default function KnowledgePage() {
                     {u.status === "done" && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#10B981" }} />}
                     {u.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
                     <span className="truncate">{u.name}</span>
-                    {u.detail && <span className="text-gray-400 shrink-0">· {u.detail}</span>}
+                    {u.status === "uploading"
+                      ? <span className="text-gray-400 shrink-0">· {(u.progress ?? 0) < 100 ? `${u.progress ?? 0}%` : "Đang xử lý…"}</span>
+                      : u.detail && <span className="text-gray-400 shrink-0">· {u.detail}</span>}
                     {u.status !== "uploading" && (
                       <button
                         onClick={() => setUploads((p) => p.filter((x) => x.id !== u.id))}
@@ -264,6 +270,12 @@ export default function KnowledgePage() {
                       >
                         <X className="w-3 h-3" />
                       </button>
+                    )}
+                    {u.status === "uploading" && (
+                      <span
+                        className="absolute bottom-0 left-0 h-0.5 transition-all duration-200"
+                        style={{ width: `${u.progress ?? 0}%`, background: "#7C3AED" }}
+                      />
                     )}
                   </span>
                 ))}

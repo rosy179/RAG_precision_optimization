@@ -13,13 +13,22 @@ import { useChatStream } from "../hooks/useChatStream";
 import type { ViewerTarget } from "../components/DocViewerPanel";
 import type { AttachmentDoc, Message, Source } from "../components/MessageBubble";
 
-interface Props { sessionId: string | null; onSessionCreated: (id: string) => void; }
+interface Props {
+  sessionId: string | null;
+  /** The active conversation's real title (from the session list) — used as
+   *  the exported Markdown heading so it matches the name shown in the sidebar. */
+  sessionTitle?: string;
+  onSessionCreated: (id: string) => void;
+}
 
 interface Attachment {
   id: string;
   name: string;
   status: "uploading" | "done" | "error";
   detail?: string;
+  /** Upload progress 0–100 while status === "uploading" (bytes sent to the
+   *  server; 100 means the server is still chunking/indexing). */
+  progress?: number;
   /** Local object URL preview — set for image files */
   previewUrl?: string;
 }
@@ -39,7 +48,7 @@ const FILE_ACCEPT = `${DOC_ACCEPT},${IMAGE_ACCEPT},${AUDIO_ACCEPT}`;
 const URL_REGEX = /^https?:\/\/\S+$/i;
 const MAX_INPUT_HEIGHT = 120;
 
-export default function ChatPage({ sessionId, onSessionCreated }: Props) {
+export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: Props) {
   // Message list + SSE streaming plumbing live in a dedicated hook (E3).
   const { messages, setMessages, sending, setSending, patchMessage, runStream, stopStreaming } =
     useChatStream(onSessionCreated);
@@ -182,12 +191,14 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     for (const file of files) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
-      setAttachments((p) => [...p, { id, name: file.name, status: "uploading", previewUrl }]);
+      setAttachments((p) => [...p, { id, name: file.name, status: "uploading", progress: 0, previewUrl }]);
       try {
-        const res = await documentsAPI.uploadFile(file, sid);
+        const res = await documentsAPI.uploadFile(file, sid, (pct) =>
+          setAttachments((p) => p.map((a) => (a.id === id ? { ...a, progress: pct } : a)))
+        );
         pendingDocsRef.current.push(file.name);
         setAttachments((p) => p.map((a) =>
-          a.id === id ? { ...a, status: "done" as const, detail: `${res.chunk_count} chunks` } : a
+          a.id === id ? { ...a, status: "done" as const, progress: 100, detail: `${res.chunk_count} chunks` } : a
         ));
       } catch (e: any) {
         setAttachments((p) => p.map((a) =>
@@ -469,8 +480,12 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
    *  answer's sources appended as a numbered list. Fully client-side. */
   const exportConversation = useCallback(() => {
     if (messages.length === 0) return;
-    const firstQ = messages.find((m) => m.role === "user")?.content ?? "Hội thoại";
-    const title = firstQ.length > 60 ? firstQ.slice(0, 60) + "…" : firstQ;
+    // Prefer the conversation's real title (shown in the sidebar). Fall back to
+    // the full first question when there's no title yet, or when the title is a
+    // truncated placeholder ending in "…" — the export shows the FULL name.
+    const firstQ = messages.find((m) => m.role === "user")?.content?.trim();
+    const named = (sessionTitle ?? "").trim();
+    const title = named && !/[…]$|\.{3}$/.test(named) ? named : (firstQ || named || "Hội thoại");
     const lines: string[] = [
       `# ${title}`,
       "",
@@ -498,11 +513,20 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    // ASCII slug from the title (Vietnamese diacritics stripped) for a clean filename.
+    const slug = title
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 50) || "hoi-thoai";
     a.href = url;
-    a.download = `hoi-thoai-${stamp}.md`;
+    a.download = `${slug}-${stamp}.md`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [messages]);
+  }, [messages, sessionTitle]);
 
   const isEmpty = messages.length === 0;
 
@@ -708,9 +732,18 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                             }}
                           />
                           {a.status === "uploading" && (
-                            <span className="absolute inset-0 flex items-center justify-center">
-                              <Loader2 className="w-4 h-4 animate-spin" style={{ color: "#7C3AED" }} />
-                            </span>
+                            <>
+                              <span className="absolute inset-0 flex flex-col items-center justify-center gap-0.5">
+                                <Loader2 className="w-4 h-4 animate-spin" style={{ color: "#7C3AED" }} />
+                                <span className="text-[9px] font-semibold leading-none" style={{ color: "#7C3AED" }}>
+                                  {(a.progress ?? 0) < 100 ? `${a.progress ?? 0}%` : "…"}
+                                </span>
+                              </span>
+                              <span
+                                className="absolute bottom-0 left-0 h-1 rounded-b-2xl transition-all duration-200"
+                                style={{ width: `${a.progress ?? 0}%`, background: "#7C3AED" }}
+                              />
+                            </>
                           )}
                           {a.status === "error" && (
                             <span className="absolute inset-0 flex items-center justify-center rounded-2xl" style={{ background: "rgba(239,68,68,0.15)" }}>
@@ -732,7 +765,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                     return (
                       <span
                         key={a.id}
-                        className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 max-w-[280px]"
+                        className="relative overflow-hidden flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 max-w-[280px]"
                         style={
                           a.status === "error"
                             ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#EF4444" }
@@ -743,7 +776,9 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                         {a.status === "done" && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#10B981" }} />}
                         {a.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
                         <span className="truncate">{a.name}</span>
-                        {a.detail && <span className="text-gray-400 shrink-0">· {a.detail}</span>}
+                        {a.status === "uploading"
+                          ? <span className="text-gray-400 shrink-0">· {(a.progress ?? 0) < 100 ? `${a.progress ?? 0}%` : "Đang xử lý…"}</span>
+                          : a.detail && <span className="text-gray-400 shrink-0">· {a.detail}</span>}
                         {a.status !== "uploading" && (
                           <button
                             onClick={remove}
@@ -751,6 +786,12 @@ export default function ChatPage({ sessionId, onSessionCreated }: Props) {
                           >
                             <X className="w-3 h-3" />
                           </button>
+                        )}
+                        {a.status === "uploading" && (
+                          <span
+                            className="absolute bottom-0 left-0 h-0.5 transition-all duration-200"
+                            style={{ width: `${a.progress ?? 0}%`, background: "#7C3AED" }}
+                          />
                         )}
                       </span>
                     );

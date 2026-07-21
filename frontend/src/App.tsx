@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { PanelLeftOpen } from "lucide-react";
 import { useAuth } from "./hooks/useAuth";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { useSessions } from "./hooks/useSessions";
 import AuthPage from "./pages/AuthPage";
 import ChatPage from "./pages/ChatPage";
 import KnowledgePage from "./pages/KnowledgePage";
@@ -13,12 +14,14 @@ import { sessionsAPI } from "./api/client";
 export default function App() {
   const { user, login, register, logout } = useAuth();
   const isMobile = useIsMobile();
+  const { sessions, status: sessionsStatus, reload: reloadSessions } = useSessions();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [sidebarKey, setSidebarKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => window.matchMedia("(min-width: 768px)").matches
   );
   const [view, setView] = useState<"chat" | "knowledge" | "dashboard">("chat");
+  const isAdmin = !!user?.is_admin;
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   // Đổi hướng / đổi cỡ màn hình: mobile mặc định đóng, desktop mặc định mở
   useEffect(() => {
@@ -56,13 +59,19 @@ export default function App() {
   const handleDeleteSession = useCallback(async (id: string) => {
     await sessionsAPI.delete(id).catch(() => {});
     if (activeSessionId === id) setActiveSessionId(null);
-    setSidebarKey((k) => k + 1);
-  }, [activeSessionId]);
+    reloadSessions();
+  }, [activeSessionId, reloadSessions]);
 
   const handleSessionCreated = useCallback((id: string) => {
     setActiveSessionId(id);
-    setSidebarKey((k) => k + 1);
-  }, []);
+    reloadSessions();
+  }, [reloadSessions]);
+
+  // Non-admins can't reach the dashboard (its data is admin-only); if a stale
+  // view lands there after permissions change, fall back to chat.
+  useEffect(() => {
+    if (view === "dashboard" && !isAdmin) setView("chat");
+  }, [view, isAdmin]);
 
   if (!user) {
     return <AuthPage onAuth={handleAuth} />;
@@ -93,12 +102,15 @@ export default function App() {
         {/* Session sidebar */}
         <SessionSidebar
         user={user}
+        isAdmin={isAdmin}
         onLogout={logout}
         onNewChat={handleNewChat}
         activeId={view === "chat" ? activeSessionId : null}
         onSelect={handleSelectSession}
         onDelete={handleDeleteSession}
-        refreshKey={sidebarKey}
+        sessions={sessions}
+        sessionsStatus={sessionsStatus}
+        onReload={reloadSessions}
         isOpen={sidebarOpen}
         onToggle={toggleSidebar}
         overlay={isMobile}
@@ -123,11 +135,12 @@ export default function App() {
         <ErrorBoundary key={view} label="Trang này">
           {view === "knowledge" ? (
             <KnowledgePage />
-          ) : view === "dashboard" ? (
+          ) : view === "dashboard" && isAdmin ? (
             <DashboardPage />
           ) : (
             <ChatPage
               sessionId={activeSessionId}
+              sessionTitle={activeSession?.title ?? ""}
               onSessionCreated={handleSessionCreated}
             />
           )}

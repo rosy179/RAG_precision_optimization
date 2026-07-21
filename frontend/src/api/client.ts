@@ -34,7 +34,18 @@ export const authAPI = {
     api.post("/api/auth/register", { email, password, name }).then((r) => r.data),
   login: (email: string, password: string) =>
     api.post("/api/auth/login", { email, password }).then((r) => r.data),
+  /** Refresh the signed-in user's server-side attributes (e.g. is_admin). */
+  me: (): Promise<{ user_id: string; email: string; is_admin: boolean }> =>
+    api.get("/api/auth/me").then((r) => r.data),
 };
+
+/** Turn an optional 0–100 progress callback into an axios upload-progress
+ *  handler; undefined when no callback is given so axios skips the work. */
+const uploadProgress = (onProgress?: (pct: number) => void) =>
+  onProgress
+    ? (e: { loaded: number; total?: number }) =>
+        onProgress(e.total ? Math.round((e.loaded / e.total) * 100) : 0)
+    : undefined;
 
 // ── Sessions ──────────────────────────────────────────────
 export const sessionsAPI = {
@@ -173,11 +184,12 @@ export const documentsAPI = {
   /** Original file bytes as a Blob (auth header applied) — for image thumbnails. */
   fileBlob: (docId: string): Promise<Blob> =>
     api.get(`/api/documents/${docId}/file`, { responseType: "blob" }).then((r) => r.data),
-  uploadFile: (file: File, sessionId: string) => {
+  uploadFile: (file: File, sessionId: string, onProgress?: (pct: number) => void) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("session_id", sessionId);
-    return api.post("/api/documents/upload", fd).then((r) => r.data);
+    return api.post("/api/documents/upload", fd, { onUploadProgress: uploadProgress(onProgress) })
+      .then((r) => r.data);
   },
   uploadUrl: (url: string, sessionId: string) => {
     const fd = new FormData();
@@ -222,10 +234,11 @@ export const knowledgeAPI = {
     api.patch(`/api/knowledge/${docId}/chunks/${chunkId}`, { text }).then((r) => r.data),
   deleteChunk: (docId: string, chunkId: string) =>
     api.delete(`/api/knowledge/${docId}/chunks/${chunkId}`).then((r) => r.data),
-  uploadFile: (file: File) => {
+  uploadFile: (file: File, onProgress?: (pct: number) => void) => {
     const fd = new FormData();
     fd.append("file", file);
-    return api.post("/api/knowledge/upload", fd).then((r) => r.data);
+    return api.post("/api/knowledge/upload", fd, { onUploadProgress: uploadProgress(onProgress) })
+      .then((r) => r.data);
   },
   uploadUrl: (url: string) => {
     const fd = new FormData();
