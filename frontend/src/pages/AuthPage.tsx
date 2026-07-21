@@ -1,10 +1,13 @@
 import { useState, type FormEvent } from "react";
 import { Loader2, Eye, EyeOff } from "lucide-react";
 import AiRobotIcon from "../components/AiRobotIcon";
+import { useI18n } from "../i18n/LanguageProvider";
+import { LANGUAGES } from "../i18n/translations";
 
 interface Props { onAuth: (email: string, password: string, name?: string, isRegister?: boolean) => Promise<void>; }
 
 export default function AuthPage({ onAuth }: Props) {
+  const { t, lang, setLang } = useI18n();
   const [tab, setTab] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -20,7 +23,7 @@ export default function AuthPage({ onAuth }: Props) {
     try {
       await onAuth(email, password, name, tab === "register");
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Đã có lỗi xảy ra");
+      setError(err?.response?.data?.detail || t("auth.genericError"));
     } finally {
       setLoading(false);
     }
@@ -47,6 +50,24 @@ export default function AuthPage({ onAuth }: Props) {
           border: "1px solid rgba(255,255,255,0.9)",
         }}
       >
+        {/* Language switcher (all breakpoints) */}
+        <div className="absolute top-4 right-4 z-40 flex items-center gap-1 rounded-full bg-white/70 backdrop-blur-sm p-1 shadow-sm border border-white/80">
+          {LANGUAGES.map((l) => (
+            <button
+              key={l.code}
+              type="button"
+              onClick={() => setLang(l.code)}
+              title={l.label}
+              aria-label={l.label}
+              className={`w-8 h-8 rounded-full flex items-center justify-center text-base transition-all ${
+                lang === l.code ? "bg-[#7C3AED]/15 ring-1 ring-[#7C3AED]/40" : "opacity-70 hover:bg-black/5"
+              }`}
+            >
+              {l.flag}
+            </button>
+          ))}
+        </div>
+
         {/* Top-left: Website description and AI Agent name (desktop only) */}
         <div className="hidden md:block absolute top-10 left-10 z-30">
           <h1 className="text-2xl font-bold text-[#1A1A2E] tracking-tight">AI Agent</h1>
@@ -100,24 +121,24 @@ export default function AuthPage({ onAuth }: Props) {
 
             <div className="text-center mb-6 md:mb-10">
               <h2 className="text-3xl font-semibold text-[#374151] mb-2" style={{ fontFamily: "Inter, sans-serif" }}>
-                {tab === "login" ? "Log in" : "Sign up"}
+                {tab === "login" ? t("auth.login") : t("auth.signup")}
               </h2>
             </div>
 
             <form onSubmit={submit} className="space-y-5">
               {tab === "register" && (
                 <div>
-                  <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>Name</label>
+                  <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>{t("auth.nameLabel")}</label>
                   <input
                     className="w-full bg-transparent border-2 border-[#E5E7EB] rounded-full px-5 py-3 text-sm outline-none focus:border-[#7C3AED] transition-colors"
-                    placeholder="Nguyễn Văn A"
+                    placeholder={t("auth.namePlaceholder")}
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                   />
                 </div>
               )}
               <div>
-                <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>Login, email or phone number</label>
+                <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>{t("auth.emailLabel")}</label>
                 <input
                   type="email"
                   className="w-full bg-transparent border-2 border-[#E5E7EB] rounded-full px-5 py-3 text-sm outline-none focus:border-[#7C3AED] transition-colors"
@@ -128,7 +149,7 @@ export default function AuthPage({ onAuth }: Props) {
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>Password</label>
+                <label className="block text-xs font-semibold mb-2 ml-2" style={{ color: "#6B7280" }}>{t("auth.passwordLabel")}</label>
                 <div className="relative">
                   <input
                     type={showPassword ? "text" : "password"}
@@ -167,14 +188,14 @@ export default function AuthPage({ onAuth }: Props) {
                 onMouseLeave={e => (e.currentTarget.style.background = "linear-gradient(to right, #3B82F6, #2563EB)")}
               >
                 {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {tab === "login" ? "Log in" : "Create account"}
+                {tab === "login" ? t("auth.login") : t("auth.createAccount")}
               </button>
             </form>
 
             <div className="mt-8 relative flex items-center justify-center">
               <div className="absolute w-full border-t border-gray-300"></div>
               <span className="px-4 text-xs font-medium text-gray-500 relative bg-transparent backdrop-blur-[2px]">
-                or {tab === "login" ? "log in" : "sign up"} with
+                {tab === "login" ? t("auth.orLogin") : t("auth.orSignup")}
               </span>
             </div>
 
@@ -200,11 +221,11 @@ export default function AuthPage({ onAuth }: Props) {
             <div className="mt-8 text-center text-xs font-semibold" style={{ color: "#6B7280" }}>
               {tab === "login" && (
                 <button className="hover:text-gray-900 transition-colors mb-2 block w-full">
-                  Forgot login or password?
+                  {t("auth.forgot")}
                 </button>
               )}
               <button onClick={() => { setTab(tab === "login" ? "register" : "login"); setError(""); }} className="hover:text-[#7C3AED] transition-colors mt-2">
-                {tab === "login" ? "Don't have an account? Sign up" : "Already have an account? Log in"}
+                {tab === "login" ? t("auth.toSignup") : t("auth.toLogin")}
               </button>
             </div>
             

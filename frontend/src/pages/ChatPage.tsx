@@ -5,6 +5,7 @@ import {
   Download, SlidersHorizontal,
 } from "lucide-react";
 import { sessionsAPI, documentsAPI, knowledgeAPI } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 import MessageBubble from "../components/MessageBubble";
 import AiRobotIcon from "../components/AiRobotIcon";
 import DocViewerPanel from "../components/DocViewerPanel";
@@ -49,6 +50,7 @@ const URL_REGEX = /^https?:\/\/\S+$/i;
 const MAX_INPUT_HEIGHT = 120;
 
 export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: Props) {
+  const { t } = useI18n();
   // Message list + SSE streaming plumbing live in a dedicated hook (E3).
   const { messages, setMessages, sending, setSending, patchMessage, runStream, stopStreaming } =
     useChatStream(onSessionCreated);
@@ -183,8 +185,8 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
       sid = await ensureSession(true);
     } catch {
       setAttachments((p) => [...p, {
-        id: `${Date.now()}-session`, name: files[0]?.name || "Tệp",
-        status: "error", detail: "Không tạo được phiên chat",
+        id: `${Date.now()}-session`, name: files[0]?.name || "—",
+        status: "error", detail: t("chat.errNoSession"),
       }]);
       return;
     }
@@ -202,7 +204,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
         ));
       } catch (e: any) {
         setAttachments((p) => p.map((a) =>
-          a.id === id ? { ...a, status: "error" as const, detail: e?.response?.data?.detail || "Lỗi upload" } : a
+          a.id === id ? { ...a, status: "error" as const, detail: e?.response?.data?.detail || t("chat.errUpload") } : a
         ));
       }
     }
@@ -222,7 +224,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
       refreshSessionDocs(sid);
     } catch (e: any) {
       setAttachments((p) => p.map((a) =>
-        a.id === id ? { ...a, status: "error" as const, detail: e?.response?.data?.detail || "Không thể fetch URL" } : a
+        a.id === id ? { ...a, status: "error" as const, detail: e?.response?.data?.detail || t("chat.errUrl") } : a
       ));
     }
   }, [ensureSession, refreshSessionDocs]);
@@ -259,9 +261,9 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
 
   const micError = useCallback((detail: string) => {
     setAttachments((p) => [...p, {
-      id: `${Date.now()}-mic`, name: "Micro", status: "error", detail,
+      id: `${Date.now()}-mic`, name: t("chat.mic"), status: "error", detail,
     }]);
-  }, []);
+  }, [t]);
 
   /** Voice input: live speech-to-text into the input box (Web Speech API).
    *  Browsers without it (e.g. Firefox) record audio and transcribe it
@@ -292,7 +294,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
           recordingRef.current = false;
           recognitionRef.current = null;
           setRecording(false);
-          micError("Không truy cập được micro");
+          micError(t("chat.errMicAccess"));
         }
         // "no-speech" / "aborted": onend restarts while still recording
       };
@@ -309,7 +311,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
         setRecording(true);
         textareaRef.current?.focus();
       } catch {
-        micError("Không khởi động được nhận dạng giọng nói");
+        micError(t("chat.errMicStart"));
       }
       return;
     }
@@ -331,7 +333,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
           const text = (res.text || "").trim();
           if (text) setInput((prev) => (prev ? prev.replace(/\s+$/, "") + " " : "") + text);
         } catch (e: any) {
-          micError(e?.response?.data?.detail || "Không chuyển được giọng nói thành văn bản");
+          micError(e?.response?.data?.detail || t("chat.errTranscribe"));
         } finally {
           setTranscribing(false);
           textareaRef.current?.focus();
@@ -342,9 +344,9 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
       recordingRef.current = true;
       setRecording(true);
     } catch {
-      micError("Không truy cập được micro");
+      micError(t("chat.errMicAccess"));
     }
-  }, [input, micError]);
+  }, [input, micError, t]);
 
   const stopRecording = useCallback(() => {
     recordingRef.current = false;
@@ -485,11 +487,11 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
     // truncated placeholder ending in "…" — the export shows the FULL name.
     const firstQ = messages.find((m) => m.role === "user")?.content?.trim();
     const named = (sessionTitle ?? "").trim();
-    const title = named && !/[…]$|\.{3}$/.test(named) ? named : (firstQ || named || "Hội thoại");
+    const title = named && !/[…]$|\.{3}$/.test(named) ? named : (firstQ || named || t("export.fallbackTitle"));
     const lines: string[] = [
       `# ${title}`,
       "",
-      `_Xuất từ RAG Chatbot · ${new Date().toLocaleString("vi-VN")}_`,
+      `_${t("export.meta", { date: new Date().toLocaleString() })}_`,
       "",
     ];
     for (const m of messages) {
@@ -497,12 +499,12 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
       if (m.role === "user") {
         lines.push(`## 👤 ${m.content}`, "");
       } else {
-        lines.push("**🤖 Trả lời:**", "", m.content, "");
+        lines.push(t("export.answer"), "", m.content, "");
         if (m.sources && m.sources.length > 0) {
-          lines.push("**Nguồn tham khảo:**");
+          lines.push(`**${t("export.sources")}**`);
           m.sources.forEach((s) => {
-            const scope = s.scope === "global" ? " _(kho chung)_" : "";
-            lines.push(`${s.rank}. ${s.title}${s.page ? ` — tr.${s.page}` : ""}${scope}`);
+            const scope = s.scope === "global" ? ` _${t("export.globalScope")}_` : "";
+            lines.push(`${s.rank}. ${s.title}${s.page ? ` — ${t("msg.page", { page: s.page })}` : ""}${scope}`);
           });
           lines.push("");
         }
@@ -526,7 +528,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
     a.download = `${slug}-${stamp}.md`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [messages, sessionTitle]);
+  }, [messages, sessionTitle, t]);
 
   const isEmpty = messages.length === 0;
 
@@ -561,7 +563,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
         {!isEmpty && (
           <button
             onClick={exportConversation}
-            title="Xuất hội thoại ra Markdown"
+            title={t("chat.exportTitle")}
             className="absolute top-3 right-3 z-20 h-9 px-3 rounded-2xl flex items-center gap-1.5 text-xs font-medium shadow-sm transition-all hover:shadow-md hover:-translate-y-px"
             style={{
               background: "rgba(255,255,255,0.8)",
@@ -571,7 +573,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
             }}
           >
             <Download className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Xuất</span>
+            <span className="hidden sm:inline">{t("chat.export")}</span>
           </button>
         )}
 
@@ -594,10 +596,10 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
             >
               <AiRobotIcon size={150} />
               <h2 className="text-2xl font-bold text-[#1A1A2E] mt-0 mb-2">
-                Xin chào! 👋
+                {t("chat.greeting")}
               </h2>
               <p className="text-sm" style={{ color: "#6B7280" }}>
-                <strong style={{ color: "#7C3AED" }}>How can I help you?</strong>
+                <strong style={{ color: "#7C3AED" }}>{t("chat.help")}</strong>
               </p>
             </div>
           ) : (
@@ -673,7 +675,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                   }}
                 >
                   <Globe className="w-3.5 h-3.5 shrink-0" style={{ color: "#3B82F6" }} />
-                  <span className="flex-1">Dán (Ctrl+V) đường link vào ô chat — link sẽ tự động được thêm làm tài liệu.</span>
+                  <span className="flex-1">{t("chat.urlTip")}</span>
                   <button onClick={() => setUrlTip(false)} className="text-gray-400 hover:text-gray-600 transition-colors">
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -693,7 +695,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                       }}
                     >
                       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                      Đang nghe… cứ nói, chữ sẽ hiện trong ô nhập — bấm ⏹ để dừng
+                      {t("chat.recording")}
                     </span>
                   )}
                   {transcribing && (
@@ -706,7 +708,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                       }}
                     >
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      Đang chuyển giọng nói thành văn bản…
+                      {t("chat.transcribing")}
                     </span>
                   )}
                   {attachments.map((a) => {
@@ -777,7 +779,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                         {a.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
                         <span className="truncate">{a.name}</span>
                         {a.status === "uploading"
-                          ? <span className="text-gray-400 shrink-0">· {(a.progress ?? 0) < 100 ? `${a.progress ?? 0}%` : "Đang xử lý…"}</span>
+                          ? <span className="text-gray-400 shrink-0">· {(a.progress ?? 0) < 100 ? `${a.progress ?? 0}%` : t("common.processing")}</span>
                           : a.detail && <span className="text-gray-400 shrink-0">· {a.detail}</span>}
                         {a.status !== "uploading" && (
                           <button
@@ -817,7 +819,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                 <textarea
                   ref={textareaRef}
                   className="flex-1 outline-none resize-none text-sm leading-6 bg-transparent placeholder-[#9CA3AF]"
-                  placeholder={recording ? "Đang nghe… hãy nói câu hỏi của bạn" : "Ask me anything........"}
+                  placeholder={recording ? t("chat.placeholderRecording") : t("chat.placeholder")}
                   style={{ color: "#1A1A2E" }}
                   rows={1}
                   value={input}
@@ -832,7 +834,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                   {/* Source picker button */}
                   <button
                     onClick={() => setPickerOpen((v) => !v)}
-                    title="Chọn nguồn tham khảo cho câu hỏi"
+                    title={t("chat.sourcePickerTitle")}
                     className="relative w-9 h-9 rounded-2xl flex items-center justify-center transition-all duration-200"
                     style={
                       pickerOpen
@@ -853,7 +855,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                       <span
                         className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
                         style={{ background: "#F59E0B", border: "2px solid #fff" }}
-                        title="Đang lọc nguồn"
+                        title={t("chat.filteringSources")}
                       />
                     )}
                   </button>
@@ -861,7 +863,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                   {/* Mic button */}
                   <button
                     onClick={recording ? stopRecording : startRecording}
-                    title={recording ? "Dừng nhập bằng giọng nói" : "Nhập câu hỏi bằng giọng nói"}
+                    title={recording ? t("chat.micStop") : t("chat.micStart")}
                     className="w-9 h-9 rounded-2xl flex items-center justify-center transition-all duration-200"
                     style={
                       recording
@@ -897,7 +899,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                   {/* Attach button */}
                   <button
                     onClick={() => openPicker(FILE_ACCEPT)}
-                    title="Đính kèm tài liệu (PDF, TXT, ảnh, audio)"
+                    title={t("chat.attach")}
                     className="w-9 h-9 rounded-2xl flex items-center justify-center transition-all duration-200"
                     style={{
                       background: "rgba(59,130,246,0.06)",
@@ -922,7 +924,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
                   <button
                     onClick={sending ? stopStreaming : send}
                     disabled={!sending && !input.trim()}
-                    title={sending ? "Dừng tạo câu trả lời" : "Gửi"}
+                    title={sending ? t("chat.stop") : t("chat.send")}
                     className="h-9 px-3 sm:px-4 rounded-2xl flex items-center gap-2 text-white text-xs font-semibold transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{
                       background: sending
@@ -979,7 +981,7 @@ export default function ChatPage({ sessionId, sessionTitle, onSessionCreated }: 
         <>
           {/* Semi-transparent backdrop: click to close */}
           <div
-            aria-label="Đóng tài liệu"
+            aria-label={t("viewer.close")}
             onClick={() => setViewerTarget(null)}
             style={{
               position: "fixed",

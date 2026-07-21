@@ -5,18 +5,18 @@ import {
 } from "lucide-react";
 import { monitoringAPI } from "../api/client";
 import type { DownvotedItem, MonitoringStats } from "../api/client";
+import { useI18n, type TFunc } from "../i18n/LanguageProvider";
 
 // Single data hue (validated vs light surface — see dataviz palette check)
 const DATA_HUE = "#7C3AED";
 const INK = "#1A1A2E";
 const MUTED = "#9CA3AF";
 
-const COMPLEXITY_LABELS: Record<string, string> = {
-  simple: "Đơn giản",
-  medium: "Trung bình",
-  complex: "Phức tạp",
-  multihop: "Multi-hop",
-};
+const COMPLEXITY_KEYS = ["simple", "medium", "complex", "multihop"] as const;
+const complexityLabel = (t: TFunc, key: string): string =>
+  (COMPLEXITY_KEYS as readonly string[]).includes(key)
+    ? t(`dash.complexity.${key}` as `dash.complexity.simple`)
+    : key;
 
 function StatTile({ icon, label, value, sub }: {
   icon: React.ReactNode; label: string; value: string; sub?: string;
@@ -39,6 +39,7 @@ function StatTile({ icon, label, value, sub }: {
 /** Bar chart: queries per day. Single series (one hue), thin bars with
  *  rounded data-ends, 2px gaps, recessive grid, per-bar hover tooltip. */
 function QueriesPerDayChart({ data }: { data: MonitoringStats["per_day"] }) {
+  const { t } = useI18n();
   const [hover, setHover] = useState<number | null>(null);
   const W = 640, H = 180, PAD_L = 30, PAD_B = 22, PAD_T = 12;
   const max = Math.max(1, ...data.map((d) => d.queries));
@@ -52,7 +53,7 @@ function QueriesPerDayChart({ data }: { data: MonitoringStats["per_day"] }) {
   return (
     <div className="relative">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img"
-        aria-label="Số truy vấn theo ngày">
+        aria-label={t("dash.queriesPerDayAria")}>
         {/* recessive gridlines + muted y labels */}
         {gridVals.map((v) => {
           const y = PAD_T + innerH * (1 - v / max);
@@ -115,8 +116,8 @@ function QueriesPerDayChart({ data }: { data: MonitoringStats["per_day"] }) {
             whiteSpace: "nowrap",
           }}
         >
-          {data[hover].date} · {data[hover].queries} truy vấn
-          {data[hover].multihop > 0 && ` (${data[hover].multihop} multi-hop)`}
+          {data[hover].date} · {data[hover].queries} {t("dash.queriesUnit")}
+          {data[hover].multihop > 0 && ` (${data[hover].multihop} ${t("dash.multihopUnit")})`}
         </div>
       )}
     </div>
@@ -126,23 +127,24 @@ function QueriesPerDayChart({ data }: { data: MonitoringStats["per_day"] }) {
 /** Horizontal magnitude bars per complexity tier — identity lives in the
  *  row label, so a single hue is correct here. */
 function ComplexityBreakdown({ data }: { data: Record<string, number> }) {
+  const { t } = useI18n();
   const rows = Object.entries(data).sort((a, b) => b[1] - a[1]);
   const max = Math.max(1, ...rows.map(([, v]) => v));
   if (rows.length === 0) {
-    return <p className="text-xs" style={{ color: MUTED }}>Chưa có dữ liệu.</p>;
+    return <p className="text-xs" style={{ color: MUTED }}>{t("dash.noData")}</p>;
   }
   return (
     <div className="space-y-2">
       {rows.map(([key, count]) => (
         <div key={key} className="flex items-center gap-3 text-xs">
           <span className="w-24 shrink-0 text-right" style={{ color: INK }}>
-            {COMPLEXITY_LABELS[key] || key}
+            {complexityLabel(t, key)}
           </span>
           <div className="flex-1 h-4 rounded-md overflow-hidden" style={{ background: "rgba(124,58,237,0.07)" }}>
             <div
               className="h-full rounded-md"
               style={{ width: `${(count / max) * 100}%`, background: DATA_HUE, minWidth: count > 0 ? 4 : 0 }}
-              title={`${count} truy vấn`}
+              title={`${count} ${t("dash.queriesUnit")}`}
             />
           </div>
           <span className="w-10 shrink-0 font-semibold" style={{ color: INK }}>{count}</span>
@@ -156,6 +158,7 @@ function ComplexityBreakdown({ data }: { data: Record<string, number> }) {
  *  be pushed into the eval queue (data/feedback_eval_queue.json) for later
  *  ground-truth labelling and regression tracking (TASKLIST D4). */
 function DownvotedPanel({ days }: { days: number }) {
+  const { t } = useI18n();
   const [items, setItems] = useState<DownvotedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -167,7 +170,7 @@ function DownvotedPanel({ days }: { days: number }) {
     setError(null);
     monitoringAPI.downvoted(Math.max(days, 30))
       .then((d) => { if (!cancelled) setItems(d.items); })
-      .catch(() => { if (!cancelled) setError("Không tải được danh sách."); });
+      .catch(() => { if (!cancelled) setError(t("dash.dv.loadError")); });
     return () => { cancelled = true; };
   }, [days]);
 
@@ -188,21 +191,21 @@ function DownvotedPanel({ days }: { days: number }) {
     >
       <p className="text-sm font-semibold mb-1 flex items-center gap-2" style={{ color: INK }}>
         <ThumbsDown className="w-4 h-4" style={{ color: "#EF4444" }} />
-        Câu trả lời bị đánh giá thấp
+        {t("dash.dv.title")}
       </p>
       <p className="text-[11px] mb-3" style={{ color: MUTED }}>
-        Đưa vào bộ eval để gán đáp án đúng và theo dõi hồi quy — khép vòng lặp cải thiện.
+        {t("dash.dv.note")}
       </p>
 
       {!items && !error && (
         <div className="flex items-center gap-2 py-4 text-xs" style={{ color: MUTED }}>
-          <Loader2 className="w-4 h-4 animate-spin" /> Đang tải…
+          <Loader2 className="w-4 h-4 animate-spin" /> {t("common.loading")}
         </div>
       )}
       {error && <p className="text-xs py-3" style={{ color: "#B91C1C" }}>{error}</p>}
       {items && items.length === 0 && (
         <p className="text-xs py-3 text-center" style={{ color: MUTED }}>
-          Chưa có câu trả lời nào bị 👎 — tốt!
+          {t("dash.dv.empty")}
         </p>
       )}
 
@@ -216,7 +219,7 @@ function DownvotedPanel({ days }: { days: number }) {
                 className="min-w-0 flex-1 text-left"
               >
                 <p className="text-xs font-semibold truncate" style={{ color: INK }}>
-                  {it.question || "(không xác định câu hỏi)"}
+                  {it.question || t("dash.dv.unknownQuestion")}
                 </p>
                 <p className="text-[11px] mt-0.5 line-clamp-1" style={{ color: MUTED }}>
                   {it.answer}
@@ -225,20 +228,20 @@ function DownvotedPanel({ days }: { days: number }) {
               {it.in_eval_queue ? (
                 <span className="shrink-0 h-7 px-2 rounded-lg flex items-center gap-1 text-[11px] font-medium"
                   style={{ background: "rgba(16,185,129,0.1)", color: "#059669" }}>
-                  <Check className="w-3.5 h-3.5" /> Đã thêm
+                  <Check className="w-3.5 h-3.5" /> {t("dash.dv.added")}
                 </span>
               ) : (
                 <button
                   onClick={() => addToQueue(it.message_id)}
                   disabled={queuing === it.message_id}
-                  title="Đưa vào bộ eval"
+                  title={t("dash.dv.addTitle")}
                   className="shrink-0 h-7 px-2.5 rounded-lg flex items-center gap-1 text-[11px] font-semibold text-white transition-colors disabled:opacity-50"
                   style={{ background: DATA_HUE }}
                 >
                   {queuing === it.message_id
                     ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     : <ClipboardCheck className="w-3.5 h-3.5" />}
-                  Vào eval
+                  {t("dash.dv.add")}
                 </button>
               )}
               <button
@@ -254,7 +257,7 @@ function DownvotedPanel({ days }: { days: number }) {
                 {it.answer}
                 {it.sources.length > 0 && (
                   <p className="mt-2" style={{ color: MUTED }}>
-                    Nguồn: {it.sources.map((s) => s.title).join(" · ")}
+                    {t("dash.dv.sources", { list: it.sources.map((s) => s.title).join(" · ") })}
                   </p>
                 )}
               </div>
@@ -267,6 +270,7 @@ function DownvotedPanel({ days }: { days: number }) {
 }
 
 export default function DashboardPage() {
+  const { t } = useI18n();
   const [stats, setStats] = useState<MonitoringStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState(14);
@@ -280,39 +284,39 @@ export default function DashboardPage() {
       .catch((e) => {
         if (!cancelled) {
           setError(e?.response?.status === 403
-            ? "Chỉ quản trị viên mới xem được thống kê hệ thống."
-            : "Không tải được thống kê.");
+            ? t("dash.errAdmin")
+            : t("dash.errLoad"));
         }
       });
     return () => { cancelled = true; };
-  }, [days]);
+  }, [days, t]);
 
   const fmtLat = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
   const kpis = useMemo(() => {
     if (!stats) return [];
     return [
       {
-        icon: <MessageSquare className="w-3.5 h-3.5" />, label: "Truy vấn",
+        icon: <MessageSquare className="w-3.5 h-3.5" />, label: t("dash.kpi.queries"),
         value: String(stats.n_queries),
-        sub: `${stats.multihop_queries} multi-hop · ${stats.errors} lỗi`,
+        sub: t("dash.kpi.queriesSub", { multihop: stats.multihop_queries, errors: stats.errors }),
       },
       {
-        icon: <Timer className="w-3.5 h-3.5" />, label: "Độ trễ P50",
+        icon: <Timer className="w-3.5 h-3.5" />, label: t("dash.kpi.latency"),
         value: fmtLat(stats.latency_ms.p50),
-        sub: `P95 ${fmtLat(stats.latency_ms.p95)} · P99 ${fmtLat(stats.latency_ms.p99)}`,
+        sub: t("dash.kpi.latencySub", { p95: fmtLat(stats.latency_ms.p95), p99: fmtLat(stats.latency_ms.p99) }),
       },
       {
-        icon: <Coins className="w-3.5 h-3.5" />, label: "Chi phí ước tính",
+        icon: <Coins className="w-3.5 h-3.5" />, label: t("dash.kpi.cost"),
         value: `$${stats.total_cost_usd.toFixed(4)}`,
-        sub: `~${stats.total_tokens.toLocaleString("vi-VN")} tokens`,
+        sub: t("dash.kpi.costSub", { tokens: stats.total_tokens.toLocaleString() }),
       },
       {
-        icon: <Activity className="w-3.5 h-3.5" />, label: "Tỷ lệ lỗi",
+        icon: <Activity className="w-3.5 h-3.5" />, label: t("dash.kpi.errorRate"),
         value: `${(stats.error_rate * 100).toFixed(1)}%`,
-        sub: `${stats.aborted} bị dừng giữa chừng`,
+        sub: t("dash.kpi.errorRateSub", { aborted: stats.aborted }),
       },
     ];
-  }, [stats]);
+  }, [stats, t]);
 
   return (
     <div
@@ -332,9 +336,9 @@ export default function DashboardPage() {
             <Activity className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-xl font-bold" style={{ color: INK }}>Thống kê hệ thống</h1>
+            <h1 className="text-xl font-bold" style={{ color: INK }}>{t("dash.title")}</h1>
             <p className="text-xs mt-0.5" style={{ color: MUTED }}>
-              Độ trễ, chi phí và mức sử dụng của pipeline RAG ({days} ngày gần nhất)
+              {t("dash.subtitle", { days })}
             </p>
           </div>
         </div>
@@ -348,7 +352,7 @@ export default function DashboardPage() {
                 ? { background: DATA_HUE, color: "#fff" }
                 : { background: "rgba(124,58,237,0.07)", color: DATA_HUE }}
             >
-              {d} ngày
+              {t("dash.days", { n: d })}
             </button>
           ))}
         </div>
@@ -366,7 +370,7 @@ export default function DashboardPage() {
 
       {!error && !stats && (
         <div className="flex items-center justify-center gap-2 mt-16 text-sm" style={{ color: MUTED }}>
-          <Loader2 className="w-4 h-4 animate-spin" /> Đang tải thống kê…
+          <Loader2 className="w-4 h-4 animate-spin" /> {t("dash.loading")}
         </div>
       )}
 
@@ -383,11 +387,11 @@ export default function DashboardPage() {
             style={{ background: "rgba(255,255,255,0.65)", border: "1px solid rgba(124,58,237,0.12)" }}
           >
             <p className="text-sm font-semibold mb-3" style={{ color: INK }}>
-              Truy vấn theo ngày
+              {t("dash.queriesPerDay")}
             </p>
             {stats.n_queries === 0 ? (
               <p className="text-xs py-6 text-center" style={{ color: MUTED }}>
-                Chưa có truy vấn nào trong khoảng thời gian này.
+                {t("dash.noQueries")}
               </p>
             ) : (
               <QueriesPerDayChart data={stats.per_day} />
@@ -402,7 +406,7 @@ export default function DashboardPage() {
             >
               <p className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: INK }}>
                 <GitBranch className="w-4 h-4" style={{ color: DATA_HUE }} />
-                Phân bố độ phức tạp truy vấn
+                {t("dash.complexityTitle")}
               </p>
               <ComplexityBreakdown data={stats.by_complexity} />
             </div>
@@ -413,22 +417,22 @@ export default function DashboardPage() {
               style={{ background: "rgba(255,255,255,0.65)", border: "1px solid rgba(124,58,237,0.12)" }}
             >
               <p className="text-sm font-semibold mb-3" style={{ color: INK }}>
-                Phản hồi người dùng
+                {t("dash.feedbackTitle")}
               </p>
               <div className="flex items-center gap-6">
                 <div className="flex items-center gap-2">
                   <ThumbsUp className="w-4 h-4" style={{ color: "#10B981" }} />
                   <span className="text-lg font-bold" style={{ color: INK }}>{stats.feedback.up}</span>
-                  <span className="text-xs" style={{ color: MUTED }}>hữu ích</span>
+                  <span className="text-xs" style={{ color: MUTED }}>{t("dash.feedbackUp")}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <ThumbsDown className="w-4 h-4" style={{ color: "#EF4444" }} />
                   <span className="text-lg font-bold" style={{ color: INK }}>{stats.feedback.down}</span>
-                  <span className="text-xs" style={{ color: MUTED }}>chưa tốt</span>
+                  <span className="text-xs" style={{ color: MUTED }}>{t("dash.feedbackDown")}</span>
                 </div>
               </div>
               <p className="text-[11px] mt-3" style={{ color: MUTED }}>
-                Tín hiệu chất lượng online — bổ sung cho điểm Ragas offline.
+                {t("dash.feedbackNote")}
               </p>
             </div>
           </div>

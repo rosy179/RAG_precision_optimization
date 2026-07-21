@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { knowledgeAPI } from "../api/client";
 import type { KbDoc } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 import DocViewerPanel from "../components/DocViewerPanel";
 import ChunkManagerPanel from "../components/ChunkManagerPanel";
 import type { ViewerTarget } from "../components/DocViewerPanel";
@@ -29,13 +30,19 @@ const typeIcon = (type: string) => {
   return <FileText className="w-4 h-4" />;
 };
 
-const typeLabel: Record<string, string> = {
-  pdf: "PDF", txt: "Văn bản", markdown: "Markdown", url: "Web", image: "Ảnh",
-  audio: "Âm thanh", docx: "Word", pptx: "PowerPoint", xlsx: "Excel",
-  corpus: "Corpus", json: "JSON",
+// Format names stay verbatim across languages; only the descriptive kinds
+// (text/web/image/audio) are translated via the component's `typeLabel`.
+const TYPE_STATIC: Record<string, string> = {
+  pdf: "PDF", markdown: "Markdown", docx: "Word", pptx: "PowerPoint",
+  xlsx: "Excel", corpus: "Corpus", json: "JSON",
 };
 
 export default function KnowledgePage() {
+  const { t } = useI18n();
+  const typeLabel = (type: string): string =>
+    TYPE_STATIC[type]
+    ?? ({ txt: t("kb.type.text"), url: t("kb.type.web"), image: t("kb.type.image"), audio: t("kb.type.audio") }[type])
+    ?? type;
   const [docs, setDocs] = useState<KbDoc[]>([]);
   const [totalChunks, setTotalChunks] = useState(0);
   const [canManage, setCanManage] = useState(false);
@@ -77,11 +84,11 @@ export default function KnowledgePage() {
         load();
       } catch (e: any) {
         setUploads((p) => p.map((u) =>
-          u.id === id ? { ...u, status: "error" as const, detail: e?.response?.data?.detail || "Lỗi upload" } : u
+          u.id === id ? { ...u, status: "error" as const, detail: e?.response?.data?.detail || t("kb.uploadError") } : u
         ));
       }
     }
-  }, [load]);
+  }, [load, t]);
 
   const uploadUrl = useCallback(async () => {
     const url = urlInput.trim();
@@ -97,10 +104,10 @@ export default function KnowledgePage() {
       load();
     } catch (e: any) {
       setUploads((p) => p.map((u) =>
-        u.id === id ? { ...u, status: "error" as const, detail: e?.response?.data?.detail || "Không thể fetch URL" } : u
+        u.id === id ? { ...u, status: "error" as const, detail: e?.response?.data?.detail || t("kb.urlError") } : u
       ));
     }
-  }, [urlInput, load]);
+  }, [urlInput, load, t]);
 
   const doDelete = useCallback(async (docId: string) => {
     setConfirmDelete(null);
@@ -161,9 +168,9 @@ export default function KnowledgePage() {
               <BookOpen className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-[#1A1A2E]">Kho kiến thức chung</h1>
+              <h1 className="text-xl font-bold text-[#1A1A2E]">{t("kb.title")}</h1>
               <p className="text-xs text-gray-500 mt-0.5">
-                {docs.length} tài liệu · {totalChunks.toLocaleString("vi-VN")} chunks · dùng chung cho mọi cuộc trò chuyện
+                {t("kb.subtitle", { docs: docs.length, chunks: totalChunks.toLocaleString() })}
               </p>
             </div>
           </div>
@@ -171,7 +178,7 @@ export default function KnowledgePage() {
             <button
               onClick={doReload}
               disabled={reloading}
-              title="Đọc lại kho từ đĩa (sau khi chạy scripts/ingest_knowledge.py)"
+              title={t("kb.syncTitle")}
               className="h-9 px-3 rounded-xl flex items-center gap-2 text-xs font-medium transition-colors disabled:opacity-50"
               style={{
                 background: "rgba(124,58,237,0.08)",
@@ -180,7 +187,7 @@ export default function KnowledgePage() {
               }}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${reloading ? "animate-spin" : ""}`} />
-              Đồng bộ từ đĩa
+              {t("kb.sync")}
             </button>
           )}
         </div>
@@ -210,7 +217,7 @@ export default function KnowledgePage() {
                 }}
               >
                 <Upload className="w-3.5 h-3.5" />
-                Tải tệp lên
+                {t("kb.upload")}
               </button>
               <div className="flex items-center flex-1 min-w-[240px] gap-2">
                 <div
@@ -220,7 +227,7 @@ export default function KnowledgePage() {
                   <Link2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#3B82F6" }} />
                   <input
                     className="flex-1 bg-transparent outline-none text-xs text-[#1A1A2E] placeholder-gray-400"
-                    placeholder="Dán URL bài viết rồi Enter…"
+                    placeholder={t("kb.urlPlaceholder")}
                     value={urlInput}
                     onChange={(e) => setUrlInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") uploadUrl(); }}
@@ -236,11 +243,11 @@ export default function KnowledgePage() {
                     border: "1px solid rgba(59,130,246,0.2)",
                   }}
                 >
-                  Thêm URL
+                  {t("kb.addUrl")}
                 </button>
               </div>
               <p className="w-full text-[11px] text-gray-400">
-                PDF, TXT, ảnh, ghi âm hoặc kéo-thả tệp vào đây. Tài liệu sẽ được chia chunk, tóm tắt và đánh index ngay — không cần khởi động lại server.
+                {t("kb.uploadHint")}
               </p>
             </div>
 
@@ -261,7 +268,7 @@ export default function KnowledgePage() {
                     {u.status === "error" && <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
                     <span className="truncate">{u.name}</span>
                     {u.status === "uploading"
-                      ? <span className="text-gray-400 shrink-0">· {(u.progress ?? 0) < 100 ? `${u.progress ?? 0}%` : "Đang xử lý…"}</span>
+                      ? <span className="text-gray-400 shrink-0">· {(u.progress ?? 0) < 100 ? `${u.progress ?? 0}%` : t("common.processing")}</span>
                       : u.detail && <span className="text-gray-400 shrink-0">· {u.detail}</span>}
                     {u.status !== "uploading" && (
                       <button
@@ -292,7 +299,7 @@ export default function KnowledgePage() {
           <Search className="w-4 h-4 text-gray-400 shrink-0" />
           <input
             className="flex-1 bg-transparent outline-none text-sm text-[#1A1A2E] placeholder-gray-400"
-            placeholder="Tìm tài liệu theo tên…"
+            placeholder={t("kb.searchPlaceholder")}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
@@ -306,11 +313,11 @@ export default function KnowledgePage() {
         {/* Docs list */}
         {loading ? (
           <div className="flex items-center justify-center gap-2 mt-10 text-gray-400 text-sm">
-            <Loader2 className="w-4 h-4 animate-spin" /> Đang tải…
+            <Loader2 className="w-4 h-4 animate-spin" /> {t("common.loading")}
           </div>
         ) : shown.length === 0 ? (
           <p className="text-sm text-gray-400 text-center mt-10">
-            {filter ? "Không có tài liệu nào khớp." : "Kho kiến thức đang trống."}
+            {filter ? t("kb.noMatch") : t("kb.empty")}
           </p>
         ) : (
           <div className="space-y-1.5 pb-8">
@@ -323,7 +330,7 @@ export default function KnowledgePage() {
                   border: "1px solid rgba(124,58,237,0.12)",
                 }}
                 onClick={() => setViewerTarget({ docId: d.id, scope: "global", title: d.name })}
-                title="Xem nội dung tài liệu"
+                title={t("kb.viewContent")}
               >
                 <div
                   className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
@@ -334,13 +341,13 @@ export default function KnowledgePage() {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-[#1A1A2E] truncate">{d.name}</p>
                   <p className="text-[11px] text-gray-400 mt-0.5">
-                    {typeLabel[d.type] || d.type} · {d.chunk_count} chunks
-                    {d.created_at && ` · ${new Date(d.created_at).toLocaleDateString("vi-VN")}`}
+                    {typeLabel(d.type)} · {d.chunk_count} chunks
+                    {d.created_at && ` · ${new Date(d.created_at).toLocaleDateString()}`}
                   </p>
                 </div>
                 <button
                   onClick={(e) => { e.stopPropagation(); setViewerTarget({ docId: d.id, scope: "global", title: d.name }); }}
-                  title="Xem nội dung"
+                  title={t("kb.viewContentShort")}
                   className="hidden md:flex opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-all shrink-0"
                 >
                   <Eye className="w-4 h-4" />
@@ -348,7 +355,7 @@ export default function KnowledgePage() {
                 {canManage && (
                   <button
                     onClick={(e) => { e.stopPropagation(); setChunkTarget({ id: d.id, name: d.name }); }}
-                    title="Xem & sửa chunk"
+                    title={t("kb.editChunk")}
                     className="hidden md:flex opacity-0 group-hover:opacity-100 w-8 h-8 rounded-lg items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-all shrink-0"
                   >
                     <Layers className="w-4 h-4" />
@@ -361,19 +368,19 @@ export default function KnowledgePage() {
                       className="h-8 px-2.5 rounded-lg text-[11px] font-semibold text-white"
                       style={{ background: "#EF4444" }}
                     >
-                      Xóa hẳn
+                      {t("common.deleteHard")}
                     </button>
                     <button
                       onClick={() => setConfirmDelete(null)}
                       className="h-8 px-2 rounded-lg text-[11px] text-gray-500 hover:bg-black/5"
                     >
-                      Hủy
+                      {t("common.cancel")}
                     </button>
                   </div>
                 ) : (
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); }}
-                    title="Xóa khỏi kho chung"
+                    title={t("kb.delete")}
                     disabled={deleting === d.id}
                     className="opacity-100 md:opacity-0 md:group-hover:opacity-100 w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0 disabled:opacity-100"
                   >
@@ -392,7 +399,7 @@ export default function KnowledgePage() {
       {viewerTarget && (
         <>
           <div
-            aria-label="Đóng tài liệu"
+            aria-label={t("viewer.close")}
             onClick={() => setViewerTarget(null)}
             style={{
               position: "fixed",
@@ -417,7 +424,7 @@ export default function KnowledgePage() {
       {chunkTarget && (
         <>
           <div
-            aria-label="Đóng trình sửa chunk"
+            aria-label={t("chunk.closeTitle")}
             onClick={() => setChunkTarget(null)}
             style={{
               position: "fixed", inset: 0, background: "rgba(15,10,30,0.22)",
