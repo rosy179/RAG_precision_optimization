@@ -10,8 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.database import get_db, ChatSession, Message, QueryLog, User
-from backend.api.auth import get_current_user
-from backend.api.knowledge import can_manage_kb
+from backend.api.auth import can_manage_kb, get_current_user
 
 router = APIRouter()
 

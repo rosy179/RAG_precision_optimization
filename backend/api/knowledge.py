@@ -6,7 +6,6 @@ query retrieves from them in addition to the session's own attachments.
 For bulk loading, prefer scripts/ingest_knowledge.py.
 """
 
-import os
 from typing import Optional
 
 import openai
@@ -15,21 +14,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.database import User
-from backend.api.auth import get_current_user
+from backend.api.auth import can_manage_kb, get_current_user
 from backend.api.documents import _pdf_path
 from backend.services import document_processor as dp
 from backend.services.global_kb import get_kb
 from backend.services.user_rag import openai_error_detail
 
 router = APIRouter()
-
-
-def can_manage_kb(user: User) -> bool:
-    """If ADMIN_EMAILS (comma-separated) is set in the environment, only
-    those accounts may modify the shared KB; otherwise any signed-in user
-    can — convenient for development, lock it down in production."""
-    admins = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
-    return not admins or user.email.lower() in admins
 
 
 def require_kb_admin(current_user: User = Depends(get_current_user)) -> User:

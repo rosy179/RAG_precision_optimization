@@ -38,6 +38,7 @@ class TokenResponse(BaseModel):
     user_id: str
     email: str
     name: str
+    is_admin: bool = False
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -51,6 +52,15 @@ def _verify(pw: str, hashed: str) -> bool:
 def _create_token(user_id: str, email: str) -> str:
     exp = datetime.utcnow() + timedelta(days=EXPIRE_DAYS)
     return jwt.encode({"sub": user_id, "email": email, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
+
+def can_manage_kb(user: User) -> bool:
+    """If ADMIN_EMAILS (comma-separated) is set in the environment, only those
+    accounts are admins — they may modify the shared KB and view the monitoring
+    dashboard; otherwise any signed-in user can (convenient for development,
+    lock it down in production). Lives here so both auth responses and the
+    KB/monitoring routers share one source of truth."""
+    admins = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+    return not admins or user.email.lower() in admins
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
@@ -75,7 +85,8 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     token = _create_token(user.id, user.email)
-    return TokenResponse(access_token=token, user_id=user.id, email=user.email, name=req.name)
+    return TokenResponse(access_token=token, user_id=user.id, email=user.email,
+                         name=req.name, is_admin=can_manage_kb(user))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -84,9 +95,11 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     if not user or not _verify(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = _create_token(user.id, user.email)
-    return TokenResponse(access_token=token, user_id=user.id, email=user.email, name="")
+    return TokenResponse(access_token=token, user_id=user.id, email=user.email,
+                         name="", is_admin=can_manage_kb(user))
 
 
 @router.get("/me")
 def me(current_user: User = Depends(get_current_user)):
-    return {"user_id": current_user.id, "email": current_user.email}
+    return {"user_id": current_user.id, "email": current_user.email,
+            "is_admin": can_manage_kb(current_user)}
