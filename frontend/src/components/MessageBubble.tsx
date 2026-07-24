@@ -9,6 +9,7 @@ import {
 import AiRobotIcon from "./AiRobotIcon";
 import { documentsAPI } from "../api/client";
 import type { GroundingResult, MultihopStep } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 
 export interface Source {
   rank: number;
@@ -182,6 +183,7 @@ const linkifyCitations = (md: string, maxRank: number): string => {
 function CitationChip({
   n, source, onClick,
 }: { n: number; source?: Source; onClick: () => void }) {
+  const { t } = useI18n();
   return (
     <span className="relative inline-block group" style={{ verticalAlign: "super", lineHeight: 1 }}>
       <button
@@ -192,7 +194,7 @@ function CitationChip({
           color: "#7C3AED",
           border: "1px solid rgba(124,58,237,0.2)",
         }}
-        title={source ? undefined : `Nguồn ${n}`}
+        title={source ? undefined : t("msg.source", { n })}
       >
         {n}
       </button>
@@ -229,6 +231,7 @@ interface HopView {
  *  query (often containing a fact discovered by the PREVIOUS hop) and the
  *  short bridging answer it produced. */
 function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?: boolean }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const hops = useMemo<HopView[]>(() => {
     const map = new Map<number, HopView>();
@@ -260,8 +263,8 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
       >
         <GitBranch className="w-3.5 h-3.5 shrink-0" />
         {streaming
-          ? `Đang suy luận nhiều bước (${hops.length}/${total})…`
-          : `Suy luận qua ${hops.length} bước tìm kiếm`}
+          ? t("msg.multihopLive", { done: hops.length, total })
+          : t("msg.multihopDone", { n: hops.length })}
         {streaming
           ? <Loader2 className="w-3 h-3 animate-spin ml-auto" />
           : (expanded ? <ChevronUp className="w-3.5 h-3.5 ml-auto" /> : <ChevronDown className="w-3.5 h-3.5 ml-auto" />)}
@@ -279,7 +282,7 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
               </span>
               <div className="min-w-0 flex-1 text-xs">
                 <p className="text-[#1A1A2E] leading-snug">
-                  <span className="font-medium text-gray-500">Tìm: </span>
+                  <span className="font-medium text-gray-500">{t("msg.searchLabel")}</span>
                   {h.query}
                 </p>
                 {h.answer ? (
@@ -292,7 +295,7 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
                   </p>
                 ) : (
                   <p className="mt-1 flex items-center gap-1.5 text-gray-400">
-                    <Loader2 className="w-3 h-3 animate-spin" /> đang tìm…
+                    <Loader2 className="w-3 h-3 animate-spin" /> {t("msg.searching")}
                   </p>
                 )}
               </div>
@@ -307,6 +310,7 @@ function MultihopSteps({ steps, streaming }: { steps: MultihopStep[]; streaming?
 /** Grounding badge: shows whether the answer's cited claims [n] were verified
  *  against their sources (the online counterpart of offline Faithfulness). */
 function GroundingBadge({ grounding }: { grounding: GroundingResult }) {
+  const { t } = useI18n();
   const { total, verified, unsupported } = grounding;
   if (!total) return null;
   const allOk = unsupported.length === 0;
@@ -319,18 +323,18 @@ function GroundingBadge({ grounding }: { grounding: GroundingResult }) {
           : { background: "rgba(245,158,11,0.12)", color: "#B45309" }}
       >
         {allOk ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
-        {allOk ? "Đã kiểm chứng" : `${verified}/${total} có căn cứ`}
+        {allOk ? t("msg.grounded") : t("msg.groundedPartial", { verified, total })}
       </span>
       <span
         className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-64 rounded-xl px-3 py-2 text-left z-30 shadow-lg text-[11px]"
         style={{ background: "rgba(255,255,255,0.97)", border: "1px solid rgba(124,58,237,0.2)", color: "#1A1A2E" }}
       >
         {allOk ? (
-          <span>Toàn bộ {total} câu có trích dẫn đều được nguồn hỗ trợ trực tiếp.</span>
+          <span>{t("msg.groundedAllTip", { total })}</span>
         ) : (
           <>
             <span className="font-semibold block mb-1">
-              {unsupported.length} câu chưa được nguồn hỗ trợ rõ:
+              {t("msg.groundedPartialTip", { count: unsupported.length })}
             </span>
             <ul className="list-disc pl-4 space-y-0.5">
               {unsupported.slice(0, 3).map((u, i) => (
@@ -348,6 +352,7 @@ export default function MessageBubble({
   msg, onFeedback, onRegenerate, onOpenSource, resolveAttachment, onOpenAttachment,
   onAskSuggestion,
 }: Props) {
+  const { t } = useI18n();
   const [showSources, setShowSources] = useState(false);
   const [highlightRank, setHighlightRank] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
@@ -376,7 +381,7 @@ export default function MessageBubble({
                     key={i}
                     role={clickable ? "button" : undefined}
                     onClick={clickable ? () => onOpenAttachment!(doc!) : undefined}
-                    title={clickable ? "Mở tài liệu" : name}
+                    title={clickable ? t("msg.openAttachment") : name}
                     className={`flex items-center gap-1.5 text-xs rounded-xl px-2.5 py-1.5 shadow-sm max-w-[240px] transition-all ${
                       clickable ? "cursor-pointer hover:shadow-md hover:-translate-y-px" : ""
                     }`}
@@ -514,7 +519,7 @@ export default function MessageBubble({
           <div className="flex items-center gap-1 mt-1.5 ml-1">
             <button
               onClick={copyAnswer}
-              title="Sao chép câu trả lời"
+              title={t("msg.copy")}
               className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-colors"
             >
               {copied ? <Check className="w-3.5 h-3.5" style={{ color: "#10B981" }} /> : <Copy className="w-3.5 h-3.5" />}
@@ -523,7 +528,7 @@ export default function MessageBubble({
               <>
                 <button
                   onClick={() => onFeedback!(msg.id, msg.feedback === "up" ? null : "up")}
-                  title="Câu trả lời hữu ích"
+                  title={t("msg.rateUp")}
                   className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hover:bg-[rgba(16,185,129,0.1)]"
                   style={{ color: msg.feedback === "up" ? "#10B981" : "#9CA3AF" }}
                 >
@@ -531,7 +536,7 @@ export default function MessageBubble({
                 </button>
                 <button
                   onClick={() => onFeedback!(msg.id, msg.feedback === "down" ? null : "down")}
-                  title="Câu trả lời chưa tốt"
+                  title={t("msg.rateDown")}
                   className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hover:bg-[rgba(239,68,68,0.1)]"
                   style={{ color: msg.feedback === "down" ? "#EF4444" : "#9CA3AF" }}
                 >
@@ -542,11 +547,11 @@ export default function MessageBubble({
             {onRegenerate && (
               <button
                 onClick={onRegenerate}
-                title="Tạo lại câu trả lời"
+                title={t("msg.regenerateTitle")}
                 className="h-7 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-colors"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                Tạo lại
+                {t("msg.regenerate")}
               </button>
             )}
             {msg.grounding && (
@@ -564,7 +569,7 @@ export default function MessageBubble({
               style={{ color: "#7C3AED" }}
             >
               {showSources ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              {showSources ? "Ẩn nguồn" : `${msg.sources.length} nguồn tham khảo`}
+              {showSources ? t("msg.hideSources") : t("msg.showSources", { n: msg.sources.length })}
             </button>
 
             {showSources && (
@@ -574,7 +579,7 @@ export default function MessageBubble({
                     key={s.rank}
                     onClick={() => { if (s.doc_id && onOpenSource) onOpenSource(s); }}
                     role={s.doc_id && onOpenSource ? "button" : undefined}
-                    title={s.doc_id && onOpenSource ? "Mở tài liệu tại đoạn này" : undefined}
+                    title={s.doc_id && onOpenSource ? t("msg.openSource") : undefined}
                     className={`flex items-start gap-2 rounded-2xl px-3 py-2.5 shadow-sm transition-all ${
                       s.doc_id && onOpenSource ? "cursor-pointer hover:shadow-md" : ""
                     }`}
@@ -598,7 +603,7 @@ export default function MessageBubble({
                       <p className="text-xs font-semibold text-[#1A1A2E] truncate">
                         <span style={{ color: "#7C3AED" }}>[{s.rank}]</span> {s.title}
                         {s.page && (
-                          <span className="ml-1.5 font-normal text-gray-400">· tr.{s.page}</span>
+                          <span className="ml-1.5 font-normal text-gray-400">· {t("msg.page", { page: s.page })}</span>
                         )}
                       </p>
                       <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{s.snippet}</p>
@@ -607,10 +612,10 @@ export default function MessageBubble({
                       <span
                         className="flex items-center gap-1 text-[10px] rounded-lg px-1.5 py-0.5 font-medium shrink-0"
                         style={{ background: "rgba(59,130,246,0.1)", color: "#3B82F6" }}
-                        title="Từ kho kiến thức chung"
+                        title={t("msg.fromGlobalKb")}
                       >
                         <BookOpen className="w-3 h-3" />
-                        Kho chung
+                        {t("msg.globalKbShort")}
                       </span>
                     )}
                     <span
@@ -633,7 +638,7 @@ export default function MessageBubble({
               <button
                 key={i}
                 onClick={() => onAskSuggestion(q)}
-                title="Hỏi câu này"
+                title={t("msg.askThis")}
                 className="flex items-center gap-1.5 text-xs rounded-2xl px-3 py-1.5 text-left transition-all hover:shadow-md hover:-translate-y-px"
                 style={{
                   background: "rgba(124,58,237,0.06)",

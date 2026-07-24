@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 import { BookOpen, FileText, X } from "lucide-react";
+import { useI18n } from "../i18n/LanguageProvider";
 
 interface PickerDoc {
   id: string;
@@ -24,6 +25,7 @@ export default function SourcePicker({
   setUseGlobalKb: (v: boolean) => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div
       className="mb-3 rounded-2xl px-3 py-3"
@@ -33,7 +35,7 @@ export default function SourcePicker({
       }}
     >
       <div className="flex items-center justify-between mb-2">
-        <p className="text-xs font-semibold text-[#1A1A2E]">Nguồn tham khảo cho câu hỏi</p>
+        <p className="text-xs font-semibold text-[#1A1A2E]">{t("picker.title")}</p>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
           <X className="w-3.5 h-3.5" />
         </button>
@@ -46,7 +48,7 @@ export default function SourcePicker({
           className="accent-[#7C3AED]"
         />
         <BookOpen className="w-3.5 h-3.5" style={{ color: "#3B82F6" }} />
-        <span>Kho kiến thức chung <span className="text-gray-400">({kbDocCount} tài liệu)</span></span>
+        <span>{t("picker.globalKb")} <span className="text-gray-400">{t("picker.docCount", { n: kbDocCount })}</span></span>
       </label>
       {sessionDocs.length > 0 ? (
         <div className="max-h-40 overflow-y-auto mt-1 space-y-0.5">
@@ -73,7 +75,7 @@ export default function SourcePicker({
         </div>
       ) : (
         <p className="text-[11px] text-gray-400 mt-1">
-          Chưa có tài liệu nào trong cuộc trò chuyện này.
+          {t("picker.empty")}
         </p>
       )}
     </div>
