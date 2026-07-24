@@ -5,6 +5,13 @@ interface Props {
   children: ReactNode;
   /** Nhãn khu vực được bọc — hiển thị trong thông báo lỗi (vd. "trang này") */
   label?: string;
+  /** Chuỗi đã dịch (i18n). Bỏ trống thì dùng mặc định tiếng Việt — dành cho
+   *  error boundary ngoài cùng nằm trên cây component có `useI18n`. */
+  title?: string;
+  /** Có placeholder {label} sẽ được thay bằng `label`. */
+  descTemplate?: string;
+  retryLabel?: string;
+  reloadLabel?: string;
 }
 
 interface State {
@@ -29,6 +36,14 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     if (!this.state.error) return this.props.children;
 
+    const label = this.props.label || "Phần này";
+    const title = this.props.title || "Đã có lỗi xảy ra";
+    const desc = (this.props.descTemplate
+      || "{label} gặp sự cố khi hiển thị. Bạn có thể thử lại hoặc tải lại trang.")
+      .replace("{label}", label);
+    const retryLabel = this.props.retryLabel || "Thử lại";
+    const reloadLabel = this.props.reloadLabel || "Tải lại trang";
+
     return (
       <div className="flex flex-1 h-full w-full items-center justify-center p-6">
         <div
@@ -47,11 +62,8 @@ export default class ErrorBoundary extends Component<Props, State> {
           >
             <AlertTriangle className="w-6 h-6" />
           </div>
-          <h2 className="text-base font-bold text-[#1A1A2E]">Đã có lỗi xảy ra</h2>
-          <p className="text-xs text-gray-500 mt-1.5">
-            {this.props.label || "Phần này"} gặp sự cố khi hiển thị. Bạn có thể thử
-            lại hoặc tải lại trang.
-          </p>
+          <h2 className="text-base font-bold text-[#1A1A2E]">{title}</h2>
+          <p className="text-xs text-gray-500 mt-1.5">{desc}</p>
           <p
             className="text-[11px] font-mono mt-3 px-3 py-2 rounded-xl break-words"
             style={{
@@ -72,7 +84,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               }}
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              Thử lại
+              {retryLabel}
             </button>
             <button
               onClick={() => window.location.reload()}
@@ -84,7 +96,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               }}
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              Tải lại trang
+              {reloadLabel}
             </button>
           </div>
         </div>

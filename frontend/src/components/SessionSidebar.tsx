@@ -12,9 +12,15 @@ import {
   Settings,
   LogOut,
   X,
+  Check,
+  Languages,
 } from "lucide-react";
 import AiRobotIcon from "./AiRobotIcon";
 import type { Session } from "../hooks/useSessions";
+import { useI18n, type TFunc } from "../i18n/LanguageProvider";
+import { LANGUAGES, type Lang } from "../i18n/translations";
+
+const LOCALES: Record<Lang, string> = { vi: "vi-VN", en: "en-US", ja: "ja-JP" };
 
 interface Props {
   user: { email: string; name?: string };
@@ -47,13 +53,15 @@ function normalize(s: string): string {
     .replace(/đ/g, "d");
 }
 
-function groupByDate(sessions: Session[]) {
+function groupByDate(sessions: Session[], t: TFunc, locale: string) {
   const today = new Date().toDateString();
   const yesterday = new Date(Date.now() - 86400000).toDateString();
   const groups: Record<string, Session[]> = {};
   for (const s of sessions) {
     const d = new Date(s.created_at).toDateString();
-    const label = d === today ? "Hôm nay" : d === yesterday ? "Hôm qua" : new Date(s.created_at).toLocaleDateString("vi-VN");
+    const label = d === today ? t("sidebar.today")
+      : d === yesterday ? t("sidebar.yesterday")
+      : new Date(s.created_at).toLocaleDateString(locale);
     if (!groups[label]) groups[label] = [];
     groups[label].push(s);
   }
@@ -79,6 +87,7 @@ export default function SessionSidebar({
   dashboardActive,
   onOpenDashboard
 }: Props) {
+  const { t, lang, setLang } = useI18n();
   const [profileOpen, setProfileOpen] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<Session | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -120,7 +129,7 @@ export default function SessionSidebar({
     return sessions.filter((s) => normalize(s.title).includes(q));
   }, [sessions, search]);
 
-  const groups = groupByDate(filtered);
+  const groups = groupByDate(filtered, t, LOCALES[lang]);
   const initial = user.name ? user.name[0].toUpperCase() : user.email[0].toUpperCase();
 
   const closeSearch = () => { setSearchOpen(false); setSearch(""); };
@@ -161,7 +170,7 @@ export default function SessionSidebar({
         <div className="px-3 space-y-0.5 mt-2 font-medium shrink-0">
           <button onClick={onNewChat} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm hover:bg-black/5 transition-colors">
             <Edit className="w-4 h-4" />
-            Đoạn chat mới
+            {t("sidebar.newChat")}
           </button>
           {searchOpen ? (
             <div
@@ -174,12 +183,12 @@ export default function SessionSidebar({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Escape") closeSearch(); }}
-                placeholder="Tìm theo tên đoạn chat…"
+                placeholder={t("sidebar.searchPlaceholder")}
                 className="flex-1 min-w-0 bg-transparent outline-none text-sm placeholder-gray-400"
               />
               <button
                 onClick={closeSearch}
-                title="Đóng tìm kiếm"
+                title={t("sidebar.searchClose")}
                 className="shrink-0 p-0.5 text-gray-400 hover:text-gray-700 rounded transition-colors"
               >
                 <X className="w-4 h-4" />
@@ -191,7 +200,7 @@ export default function SessionSidebar({
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm hover:bg-black/5 transition-colors"
             >
               <Search className="w-4 h-4" />
-              Tìm kiếm đoạn chat
+              {t("sidebar.search")}
             </button>
           )}
           <button
@@ -201,7 +210,7 @@ export default function SessionSidebar({
             }`}
           >
             <BookOpen className="w-4 h-4" style={{ color: "#3B82F6" }} />
-            Kho kiến thức
+            {t("sidebar.knowledge")}
           </button>
           {isAdmin && (
             <button
@@ -211,14 +220,14 @@ export default function SessionSidebar({
               }`}
             >
               <Activity className="w-4 h-4" style={{ color: "#7C3AED" }} />
-              Thống kê
+              {t("sidebar.stats")}
             </button>
           )}
         </div>
 
         {/* Recent Sessions Header (Fixed) */}
         <div className="px-6 mt-6 mb-2 shrink-0">
-          <p className="text-sm font-semibold">Gần đây</p>
+          <p className="text-sm font-semibold">{t("sidebar.recent")}</p>
         </div>
 
         {/* Recent Sessions List (Scrollable) */}
@@ -227,20 +236,20 @@ export default function SessionSidebar({
           {sessionsStatus === "loading" && sessions.length === 0 && (
             <div className="flex items-center justify-center gap-2 text-xs text-gray-400 mt-6">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Đang tải...
+              {t("common.loading")}
             </div>
           )}
           {sessionsStatus === "error" && (
             <div className="flex flex-col items-center gap-2 mt-6">
-              <p className="text-xs text-gray-400">Không thể tải lịch sử</p>
+              <p className="text-xs text-gray-400">{t("sidebar.loadError")}</p>
               <button onClick={() => onReload()} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:bg-black/5">
-                <RefreshCw className="w-3 h-3" /> Thử lại
+                <RefreshCw className="w-3 h-3" /> {t("common.retry")}
               </button>
             </div>
           )}
           {sessionsStatus === "done" && search.trim() && filtered.length === 0 && (
             <p className="text-xs text-gray-400 text-center mt-6">
-              Không tìm thấy đoạn chat nào khớp “{search.trim()}”.
+              {t("sidebar.noSearchResults", { q: search.trim() })}
             </p>
           )}
 
@@ -259,7 +268,7 @@ export default function SessionSidebar({
                     <span className="truncate pr-2">{s.title}</span>
                     <button
                       onClick={(e) => { e.stopPropagation(); setConfirmTarget(s); }}
-                      title="Xóa cuộc hội thoại"
+                      title={t("sidebar.deleteChat")}
                       className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 rounded-md hover:bg-black/5 transition-all shrink-0"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -285,14 +294,35 @@ export default function SessionSidebar({
               <div className="p-1.5">
                 <button className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm text-gray-700 hover:bg-gray-100 transition-colors">
                   <Settings className="w-4 h-4" />
-                  Cài đặt
+                  {t("sidebar.settings")}
                 </button>
+
+                {/* Language switcher */}
+                <div className="px-3 pt-2 pb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  <Languages className="w-3.5 h-3.5" />
+                  {t("sidebar.language")}
+                </div>
+                {LANGUAGES.map((l) => (
+                  <button
+                    key={l.code}
+                    onClick={() => setLang(l.code)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-colors ${
+                      lang === l.code ? "bg-[rgba(124,58,237,0.08)] font-semibold text-[#7C3AED]" : "text-gray-700 hover:bg-gray-100"
+                    }`}
+                  >
+                    <span className="text-base leading-none">{l.flag}</span>
+                    {l.label}
+                    {lang === l.code && <Check className="w-4 h-4 ml-auto" />}
+                  </button>
+                ))}
+
+                <div className="my-1.5 border-t border-gray-100" />
                 <button
                   onClick={onLogout}
                   className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm text-red-600 hover:bg-red-50 transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
-                  Đăng xuất
+                  {t("sidebar.logout")}
                 </button>
               </div>
             </div>
@@ -337,11 +367,11 @@ export default function SessionSidebar({
                 </div>
                 <div className="min-w-0">
                   <p id="delete-session-title" className="font-semibold text-[15px] text-gray-900">
-                    Xóa cuộc hội thoại?
+                    {t("sidebar.deleteConfirmTitle")}
                   </p>
                   <p className="text-sm text-gray-500 mt-1">
-                    "<span className="font-medium text-gray-700">{confirmTarget.title}</span>" sẽ bị
-                    xóa vĩnh viễn và không thể hoàn tác.
+                    <span className="font-medium text-gray-700">{confirmTarget.title}</span>{" "}
+                    {t("sidebar.deleteConfirmSuffix")}
                   </p>
                 </div>
               </div>
@@ -351,7 +381,7 @@ export default function SessionSidebar({
                   autoFocus
                   className="px-4 py-2 rounded-xl text-sm font-medium text-gray-600 hover:bg-black/5 transition-colors"
                 >
-                  Hủy
+                  {t("common.cancel")}
                 </button>
                 <button
                   onClick={() => {
@@ -361,7 +391,7 @@ export default function SessionSidebar({
                   className="px-4 py-2 rounded-xl text-sm font-semibold text-white transition-opacity hover:opacity-90"
                   style={{ background: "#EF4444" }}
                 >
-                  Xóa
+                  {t("common.deleteHard")}
                 </button>
               </div>
             </div>
