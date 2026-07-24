@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { documentsAPI, knowledgeAPI, authHeaders } from "../api/client";
 import type { DocContent } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -39,6 +40,7 @@ const highlightPhrases = (snippet?: string): string[] => {
 export default function DocViewerPanel({
   target, onClose,
 }: { target: ViewerTarget; onClose: () => void }) {
+  const { t } = useI18n();
   const [content, setContent] = useState<DocContent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"pdf" | "text">("text");
@@ -79,7 +81,7 @@ export default function DocViewerPanel({
         setMode(data.has_file ? "pdf" : "text");
       })
       .catch((e) => {
-        if (!cancelled) setError(e?.response?.data?.detail || "Không tải được tài liệu");
+        if (!cancelled) setError(e?.response?.data?.detail || t("viewer.loadError"));
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -198,16 +200,16 @@ export default function DocViewerPanel({
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-[#1A1A2E] truncate">
-            {content?.name || target.title || "Tài liệu"}
+            {content?.name || target.title || t("common.document")}
           </p>
           {target.scope === "global" && (
-            <p className="text-[10px]" style={{ color: "#3B82F6" }}>Kho kiến thức chung</p>
+            <p className="text-[10px]" style={{ color: "#3B82F6" }}>{t("viewer.globalKb")}</p>
           )}
         </div>
         {content?.has_file && (
           <button
             onClick={() => setMode(mode === "pdf" ? "text" : "pdf")}
-            title={mode === "pdf" ? "Xem dạng văn bản" : "Xem PDF gốc"}
+            title={mode === "pdf" ? t("viewer.viewText") : t("viewer.viewPdf")}
             className="h-7 px-2 rounded-lg flex items-center gap-1 text-[11px] font-medium transition-colors"
             style={{
               background: "rgba(124,58,237,0.08)",
@@ -216,7 +218,7 @@ export default function DocViewerPanel({
             }}
           >
             {mode === "pdf" ? <AlignLeft className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
-            {mode === "pdf" ? "Văn bản" : "PDF"}
+            {mode === "pdf" ? t("viewer.text") : t("viewer.pdf")}
           </button>
         )}
         <button
@@ -237,7 +239,7 @@ export default function DocViewerPanel({
             color: "#713F12",
           }}
         >
-          <span className="font-semibold">Đoạn được trích dẫn: </span>
+          <span className="font-semibold">{t("viewer.citedSnippet")}</span>
           <span className="line-clamp-2">{target.snippet}</span>
         </div>
       )}
@@ -249,7 +251,7 @@ export default function DocViewerPanel({
         )}
         {!error && !content && (
           <div className="flex items-center justify-center gap-2 mt-8 text-gray-400 text-sm">
-            <Loader2 className="w-4 h-4 animate-spin" /> Đang tải tài liệu…
+            <Loader2 className="w-4 h-4 animate-spin" /> {t("viewer.loading")}
           </div>
         )}
         {content && mode === "text" && renderText()}
@@ -263,7 +265,7 @@ export default function DocViewerPanel({
             onLoadError={() => setMode("text")}
             loading={
               <div className="flex items-center justify-center gap-2 mt-8 text-gray-400 text-sm">
-                <Loader2 className="w-4 h-4 animate-spin" /> Đang tải PDF…
+                <Loader2 className="w-4 h-4 animate-spin" /> {t("viewer.loadingPdf")}
               </div>
             }
           >
@@ -291,7 +293,7 @@ export default function DocViewerPanel({
             <ChevronLeft className="w-4 h-4" />
           </button>
           <span className="text-xs text-gray-600 font-medium">
-            Trang {pageNumber} / {numPages}
+            {t("viewer.pageOf", { page: pageNumber, total: numPages })}
           </span>
           <button
             onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}

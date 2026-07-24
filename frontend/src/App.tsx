@@ -3,6 +3,7 @@ import { PanelLeftOpen } from "lucide-react";
 import { useAuth } from "./hooks/useAuth";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useSessions } from "./hooks/useSessions";
+import { useI18n } from "./i18n/LanguageProvider";
 import AuthPage from "./pages/AuthPage";
 import ChatPage from "./pages/ChatPage";
 import KnowledgePage from "./pages/KnowledgePage";
@@ -13,8 +14,9 @@ import { sessionsAPI } from "./api/client";
 
 export default function App() {
   const { user, login, register, logout } = useAuth();
+  const { t } = useI18n();
   const isMobile = useIsMobile();
-  const { sessions, status: sessionsStatus, reload: reloadSessions } = useSessions();
+  const { sessions, status: sessionsStatus, reload: reloadSessions } = useSessions(!!user);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => window.matchMedia("(min-width: 768px)").matches
@@ -132,7 +134,14 @@ export default function App() {
         )}
         {/* Crash của một trang chỉ thay trang đó bằng thông báo lỗi,
             sidebar vẫn dùng được; key={view} reset boundary khi chuyển trang */}
-        <ErrorBoundary key={view} label="Trang này">
+        <ErrorBoundary
+          key={view}
+          label={t("error.pageLabel")}
+          title={t("error.title")}
+          descTemplate={t("error.desc")}
+          retryLabel={t("common.retry")}
+          reloadLabel={t("error.reload")}
+        >
           {view === "knowledge" ? (
             <KnowledgePage />
           ) : view === "dashboard" && isAdmin ? (

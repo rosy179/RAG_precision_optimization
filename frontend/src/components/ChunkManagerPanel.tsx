@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil, Save, Trash2, X } from "lucide-react";
 import { knowledgeAPI } from "../api/client";
 import type { KbChunk } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 
 /** Admin chunk editor for a KB document (RAGFlow-style): list every parsed
  *  chunk, edit its text (re-embeds), or delete a junk chunk. Fits the
@@ -16,6 +17,7 @@ export default function ChunkManagerPanel({
   /** Called after any edit/delete so the doc list can refresh chunk_count. */
   onChanged?: () => void;
 }) {
+  const { t } = useI18n();
   const [chunks, setChunks] = useState<KbChunk[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -34,7 +36,7 @@ export default function ChunkManagerPanel({
     setError(null);
     knowledgeAPI.chunks(docId)
       .then((d) => setChunks(d.chunks))
-      .catch((e) => setError(e?.response?.data?.detail || "Không tải được danh sách chunk"));
+      .catch((e) => setError(e?.response?.data?.detail || t("chunk.loadError")));
   };
   useEffect(load, [docId]);
 
@@ -50,7 +52,7 @@ export default function ChunkManagerPanel({
       setEditing(null);
       onChanged?.();
     } catch (e: any) {
-      setError(e?.response?.data?.detail || "Lưu chunk thất bại");
+      setError(e?.response?.data?.detail || t("chunk.saveError"));
     } finally {
       setBusy(null);
     }
@@ -64,7 +66,7 @@ export default function ChunkManagerPanel({
       setConfirmDel(null);
       onChanged?.();
     } catch (e: any) {
-      setError(e?.response?.data?.detail || "Xóa chunk thất bại");
+      setError(e?.response?.data?.detail || t("chunk.deleteError"));
     } finally {
       setBusy(null);
     }
@@ -89,9 +91,9 @@ export default function ChunkManagerPanel({
           <Pencil className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-[#1A1A2E] truncate">Sửa chunk · {docName}</p>
+          <p className="text-sm font-semibold text-[#1A1A2E] truncate">{t("chunk.title", { name: docName })}</p>
           <p className="text-[10px]" style={{ color: "#7C3AED" }}>
-            {chunks ? `${chunks.length} chunk` : "Đang tải…"} · sửa để re-embed, xóa chunk rác
+            {chunks ? t("chunk.count", { n: chunks.length }) : t("common.loading")} · {t("chunk.subtitle")}
           </p>
         </div>
         <button
@@ -112,11 +114,11 @@ export default function ChunkManagerPanel({
         )}
         {!error && !chunks && (
           <div className="flex items-center justify-center gap-2 mt-8 text-gray-400 text-sm">
-            <Loader2 className="w-4 h-4 animate-spin" /> Đang tải chunk…
+            <Loader2 className="w-4 h-4 animate-spin" /> {t("chunk.loading")}
           </div>
         )}
         {chunks && chunks.length === 0 && (
-          <p className="text-sm text-gray-400 text-center mt-8">Tài liệu không còn chunk nào.</p>
+          <p className="text-sm text-gray-400 text-center mt-8">{t("chunk.empty")}</p>
         )}
         {chunks?.map((c) => (
           <div key={c.id} className="rounded-2xl overflow-hidden"
@@ -127,23 +129,23 @@ export default function ChunkManagerPanel({
                 style={{ background: "rgba(124,58,237,0.12)", color: "#7C3AED" }}>
                 #{c.chunk_index}
               </span>
-              {c.page && <span className="text-[10px] text-gray-400">tr.{c.page}</span>}
+              {c.page && <span className="text-[10px] text-gray-400">{t("msg.page", { page: c.page })}</span>}
               <div className="ml-auto flex items-center gap-1">
                 {editing === c.id ? (
                   <>
                     <button
                       onClick={() => saveEdit(c)}
                       disabled={busy === c.id}
-                      title="Lưu"
+                      title={t("common.save")}
                       className="h-6 px-2 rounded-lg flex items-center gap-1 text-[11px] font-semibold text-white transition-colors disabled:opacity-50"
                       style={{ background: "#7C3AED" }}
                     >
                       {busy === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                      Lưu
+                      {t("common.save")}
                     </button>
                     <button onClick={() => setEditing(null)}
                       className="h-6 px-2 rounded-lg text-[11px] text-gray-500 hover:bg-black/5">
-                      Hủy
+                      {t("common.cancel")}
                     </button>
                   </>
                 ) : confirmDel === c.id ? (
@@ -155,20 +157,20 @@ export default function ChunkManagerPanel({
                       style={{ background: "#EF4444" }}
                     >
                       {busy === c.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                      Xóa hẳn
+                      {t("common.deleteHard")}
                     </button>
                     <button onClick={() => setConfirmDel(null)}
                       className="h-6 px-2 rounded-lg text-[11px] text-gray-500 hover:bg-black/5">
-                      Hủy
+                      {t("common.cancel")}
                     </button>
                   </>
                 ) : (
                   <>
-                    <button onClick={() => startEdit(c)} title="Sửa"
+                    <button onClick={() => startEdit(c)} title={t("chunk.edit")}
                       className="w-6 h-6 rounded-lg flex items-center justify-center text-gray-400 hover:text-[#7C3AED] hover:bg-[rgba(124,58,237,0.08)] transition-colors">
                       <Pencil className="w-3.5 h-3.5" />
                     </button>
-                    <button onClick={() => setConfirmDel(c.id)} title="Xóa chunk"
+                    <button onClick={() => setConfirmDel(c.id)} title={t("chunk.delete")}
                       className="w-6 h-6 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
