@@ -18,9 +18,13 @@ api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401) {
+      // Chỉ ép reload về /login khi PHIÊN thực sự hết hạn (đang có token).
+      // Nếu 401 mà không hề có token (request lỡ bắn lúc chưa đăng nhập) thì
+      // đừng reload — nếu không sẽ lặp vô hạn ngay trên trang đăng nhập.
+      const hadToken = !!localStorage.getItem("token");
       localStorage.removeItem("token");
       localStorage.removeItem("user");
-      window.location.href = "/login";
+      if (hadToken) window.location.href = "/login";
     }
     return Promise.reject(err);
   }
@@ -117,7 +121,9 @@ export async function chatStream(
     return;
   }
   if (!res.ok || !res.body) {
-    let detail = "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.";
+    // Empty when the error body has no server detail — the caller localizes
+    // the fallback message (see useChatStream's onError).
+    let detail = "";
     try {
       detail = (await res.json()).detail || detail;
     } catch { /* non-JSON error body */ }

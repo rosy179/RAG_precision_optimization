@@ -11,8 +11,13 @@ const RETRY_DELAY_MS = 2000;
  * focus, and exposes `reload` for after create/delete. Lifted out of
  * SessionSidebar so the sidebar (list + search) and ChatPage (export uses
  * the active session's real title) read from one source of truth.
+ *
+ * `enabled` = người dùng đã đăng nhập. Khi chưa đăng nhập, KHÔNG được gọi
+ * /api/sessions: request sẽ 401, interceptor ép reload về /login, và vì hook
+ * này chạy vô điều kiện trong App (trước guard !user) nó sẽ lặp vô hạn ngay
+ * trên trang đăng nhập. Khi `enabled` chuyển true (vừa đăng nhập) hook tự nạp.
  */
-export function useSessions() {
+export function useSessions(enabled: boolean) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
 
@@ -41,6 +46,14 @@ export function useSessions() {
   }, []);
 
   useEffect(() => {
+    // Chưa đăng nhập: dọn state, huỷ mọi retry đang chờ, KHÔNG gọi API.
+    if (!enabled) {
+      window.clearTimeout(timerRef.current);
+      generationRef.current++;
+      setSessions([]);
+      setStatus("loading");
+      return;
+    }
     reload();
     const onFocus = () => reload();
     window.addEventListener("focus", onFocus);
@@ -49,7 +62,7 @@ export function useSessions() {
       window.clearTimeout(timerRef.current);
       generationRef.current++;
     };
-  }, [reload]);
+  }, [enabled, reload]);
 
   return { sessions, status, reload };
 }

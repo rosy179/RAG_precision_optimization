@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { chatStream } from "../api/client";
+import { useI18n } from "../i18n/LanguageProvider";
 import type { Message, Source } from "../components/MessageBubble";
 
 /** Body accepted by a single streamed exchange (mirrors chatStream's body). */
@@ -18,6 +19,7 @@ export interface StreamBody {
  * creation, source-picker params) and just drive one exchange via `runStream`.
  */
 export function useChatStream(onSessionCreated: (id: string) => void) {
+  const { t } = useI18n();
   const [messages, setMessages] = useState<Message[]>([]);
   const [sending, setSending] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -61,14 +63,14 @@ export function useChatStream(onSessionCreated: (id: string) => void) {
         onSuggestions: (questions) => patchMessage(liveId, { suggestions: questions }),
         onGrounding: (grounding) => patchMessage(liveId, { grounding }),
         onError: (detail) => {
-          content = content || detail;
+          content = content || detail || t("chat.errorGeneric");
           patchMessage(aiId, { content, streaming: false });
         },
       }, ctrl.signal);
     } catch (err: any) {
       if (err?.name !== "AbortError") {
         patchMessage(aiId, {
-          content: content || "Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại.",
+          content: content || t("chat.errorGeneric"),
           streaming: false,
         });
       }
@@ -78,7 +80,7 @@ export function useChatStream(onSessionCreated: (id: string) => void) {
       setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
       setSending(false);
     }
-  }, [patchMessage, onSessionCreated]);
+  }, [patchMessage, onSessionCreated, t]);
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
