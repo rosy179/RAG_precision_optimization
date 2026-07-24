@@ -124,6 +124,16 @@ def classify_heuristic(query: str) -> str:
     words = q.split()
     word_count = len(words)
 
+    # CJK (Japanese/Chinese) text has no spaces, so `.split()` collapses the
+    # whole question to ~1 "word"; every query then hits the `word_count <= 8`
+    # simple tiebreak below, and the multi-hop router (gated on medium/complex
+    # in chat.py) never fires for Japanese. Approximate a word count from CJK
+    # character runs (~2 chars/word) so unspaced questions classify by length
+    # like spaced ones do. EN/VI are unaffected — cjk_chars is 0 for them.
+    cjk_chars = len(re.findall(r'[぀-ヿ一-鿿ｦ-ﾟ]', q))
+    if cjk_chars:
+        word_count = max(word_count, cjk_chars // 2)
+
     complex_hits = _signal_count(COMPLEX_SIGNALS, q)
     simple_hits  = _signal_count(SIMPLE_SIGNALS,  q)
 
